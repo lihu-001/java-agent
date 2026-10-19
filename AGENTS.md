@@ -1,0 +1,32 @@
+# Repository Guidelines
+
+## 项目结构与模块组织
+
+当前实现 `dev.learnagent.s01` 的纯文本对话循环，入口为 `AgentLoopMain`。`src/main/java` 放应用代码，`src/test/java` 放测试，按需使用 `src/main/resources` 放配置和资源。按课次划分包，测试包路径与被测代码一致。新增模块时，在根目录 README 说明模块职责和入口。扩展课程前阅读 `docs/JAVA_PRACTICE_SPEC.md` 的当前范围。
+
+## 构建、测试与本地开发
+
+使用 JDK 17 和 Maven。`mvn test` 运行测试，`mvn package` 构建普通 JAR，`mvn -q compile exec:java` 启动第一课。Windows 可将 `mvn` 替换为 `.\mvnw.cmd` 使用项目包装器。真实模型配置见 README，自动测试无需 API 密钥。
+
+## 编码风格与命名
+
+文件读写默认使用 UTF-8。新增 Java 代码使用四个空格缩进；类名采用 `PascalCase`，方法和变量采用 `camelCase`，常量采用 `UPPER_SNAKE_CASE`。保持包名全小写。引入格式化或静态检查工具时，提交配置，并让本地命令与持续集成使用同一套规则。
+
+## 测试指南
+
+使用 JUnit 5，版本固定在 `pom.xml`，暂不设覆盖率门槛。增加功能时，为关键行为和错误路径编写测试；测试类按 `*Test.java` 命名并放入 `src/test/java`。HTTP 协议测试使用本地模拟服务，真实服务商验证单独记录。提交前运行相关测试，在拉取请求中记录结果。
+
+## 提交与拉取请求
+
+当前目录没有 Git 历史，因此没有可归纳的提交格式。建立仓库后，建议使用简短、可检索的提交主题，例如 `feat: add agent runner` 或 `fix: handle timeout`，一次提交聚焦一项改动。拉取请求应说明目的、主要改动和验证结果；关联适用的议题。涉及界面时附截图，涉及配置时列出新增配置项及默认值。
+
+
+
+基本java开发规则
+
+
+1、使用jdk 17语法
+
+2、工具类优先使用hutool
+
+3、json使用fastjson2

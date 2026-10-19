@@ -1,0 +1,9 @@
+/target/
+/config.properties
+/.idea/
+*.iml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
