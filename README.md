@@ -1,12 +1,73 @@
-# Java Agent 实战
+# Java Agent 逐课实战
 
-当前实现 s01 Agent Loop、s02 Tool Use、s03 Permission 和 s04 Hooks：通过 OpenAI 兼容接口对话，程序执行模型请求的工具并回传结果，再请求模型，直到给出最终回答。支持一次回复中的多个工具调用，按返回顺序执行。输入 `exit`、`quit` 或遇到输入结束时退出。
+四个独立 Maven 子工程，每课保存该阶段完整源码和测试。后续课程以前一课为基础修改、扩展，模块之间没有 Java 依赖；修改 S04 不会改变 S01—S03。根 POM 只聚合构建并统一 JDK、依赖和插件版本。
 
-使用 JDK 17、Maven、Hutool 和 fastjson2。s01 只提供 `shell`；s02 新增文件工具和注册分派；s03 基于 S02 在执行前增加权限规则和逐次用户确认；s04 增加提示词记录前、工具调用前后和任务完成后的四类钩子。
+| 模块 | 本课能力 | 相较上一课新增 | 默认入口 |
+| --- | --- | --- | --- |
+| [s01](s01/README.md) | 最小文本对话 Loop | 输入、请求、历史、退出和错误恢复；没有工具 | `dev.learnagent.s01.AgentLoopMain` |
+| [s02](s02/README.md) | 单工具与多工具调用 | Shell、四个文件工具、分派和工具结果回传 | `dev.learnagent.s02.ToolUseMain` |
+| [s03](s03/README.md) | 工具权限处理 | ALLOW / DENY / ASK、逐次确认 | `dev.learnagent.s03.PermissionMain` |
+| [s04](s04/README.md) | 四类 Hook | 提示词记录前、工具调用前后、任务完成后 | `dev.learnagent.s04.HooksMain` |
+
+每课的全部 Java 类位于自己的 `dev.learnagent.s0N` 包及子包，阅读时无需跳到其他模块。S04 已按配置、循环、模型、工具、权限和 Hook 分包，结构见 [S04 README](s04/README.md)。重复源码是用于对照学习的阶段快照，没有额外 common 模块。
+
+## 目录
+
+```text
+pom.xml                         # 父 POM：聚合构建、版本管理
+mvnw / mvnw.cmd / .mvn/          # 共用 Maven Wrapper
+s01/                            # 最小对话，6 个生产类
+s02/                            # 基于 S01 增加工具
+s03/                            # 基于 S02 增加权限
+s04/                            # 基于 S03 增加 Hook
+  pom.xml                       # 各模块都有独立 POM
+  README.md                     # 范围、增量说明和阅读顺序
+  config.example.properties     # 配置示例
+  src/main/java/dev/learnagent/s04/
+  src/test/java/dev/learnagent/s04/
+  playground/                   # S02—S04 各有工具练习目录
+config.example.properties       # 根目录启动时的共享配置示例
+playground/                     # 根目录启动时的默认练习目录
+docs/lessons/                   # 四课机制和练习
+docs/history/                   # 拆分前的验证记录
+```
 
 ## 构建与启动
 
-在项目根目录编辑 `config.properties`（UTF-8 编码），填写服务商地址、模型和密钥。新检出项目时，先复制 `config.example.properties` 为 `config.properties`。
+使用 JDK 17、Maven 3.9.3、Hutool、fastjson2 和 JUnit 5。自动测试无需模型密钥。从仓库根目录运行：
+
+```powershell
+# 全部课程
+.\mvnw.cmd test
+.\mvnw.cmd package
+
+# 单课测试、打包：无需先 install 其他模块，也无需 -am
+.\mvnw.cmd -pl s01 test
+.\mvnw.cmd -pl s04 package
+
+# 各课默认入口，无需手写 exec.mainClass
+.\mvnw.cmd -pl s01 -q compile exec:java
+.\mvnw.cmd -pl s02 -q compile exec:java
+.\mvnw.cmd -pl s03 -q compile exec:java
+.\mvnw.cmd -pl s04 -q compile exec:java
+```
+
+根工程不再包含应用入口，启动时必须选课。各模块生成自己的普通 JAR，使用 `exec:java` 加载依赖运行。
+
+也可进入子工程独立构建运行：
+
+```powershell
+cd s03
+..\mvnw.cmd test
+..\mvnw.cmd -q compile exec:java
+# 或本机 Maven：mvn test / mvn -q compile exec:java
+```
+
+独立指源码、测试和运行不需要其他课程的产物；各课仍通过 `../pom.xml` 继承父 POM，并共用根目录 Wrapper。
+
+## 配置与工作目录
+
+程序从**进程当前工作目录**读取 UTF-8 `config.properties`。首次运行，将该目录的 `config.example.properties` 复制为 `config.properties` 并填写：
 
 ```properties
 openai.base-url=https://你的服务商地址/v1
@@ -14,144 +75,26 @@ openai.model=你的模型名称
 openai.api-key=你的密钥
 ```
 
-值不要加引号。保存后在项目根目录运行：
+从根目录执行 `-pl s0N` 使用根配置及根 `playground/`，现有本地配置继续可用。进入子工程启动则使用子工程自己的配置和练习目录。IDE 工作目录也按同一规则设置。真实密钥不复制、不提交。
 
-```powershell
-.\mvnw.cmd test
-.\mvnw.cmd package
-
-.\mvnw.cmd -q compile exec:java
-
-# 第二课（引号保证 PowerShell 正确传递 Maven 属性）
-.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s02.ToolUseMain"
-
-# 第三课
-.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s03.PermissionMain"
-
-# 第四课
-.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s04.HooksMain"
-```
-
-也可直接使用已安装的 Maven，例如 `mvn test`、`mvn package`、`mvn -q compile exec:java`。Wrapper 固定 Maven 3.9.3，首次运行需联网下载 Maven 和依赖。`package` 生成普通 JAR，运行时通过 `exec:java` 加载依赖。
-
-| 配置项 | 说明 | 默认值 |
+| 配置项 | 使用范围 | 默认值 |
 | --- | --- | --- |
-| `openai.base-url` | 服务商的 API 基础地址，保留其要求的路径前缀；程序追加 `/chat/completions` | 省略时使用 `https://api.openai.com/v1` |
-| `openai.model` | 服务商支持的模型 ID | 必填 |
-| `openai.api-key` | API 密钥，仅在本地设置 | 必填 |
-| `agent.work-dir` | Shell 及文件工具的工作目录；相对路径以程序启动目录为基准，不存在时自动创建 | `playground` |
-| `agent.max-model-calls` | 每次用户输入最多请求模型的次数，包含最终回答请求 | `10` |
-| `shell.timeout-seconds` | 每条 Shell 命令的超时秒数 | `30` |
-| `shell.max-output-chars` | 每条命令保留的输出字符数（不含状态和截断提示） | `12000` |
+| `openai.base-url` | S01—S04，程序追加 `/chat/completions` | `https://api.openai.com/v1` |
+| `openai.model` | S01—S04 | 必填 |
+| `openai.api-key` | S01—S04 | 必填，仅本地文件 |
+| `agent.work-dir` | S02—S04 | `playground`，相对进程工作目录 |
+| `agent.max-model-calls` | S02—S04，每轮模型请求上限 | `10` |
+| `shell.timeout-seconds` | S02—S04 | `30` |
+| `shell.max-output-chars` | S02—S04 | `12000` |
 
-基础地址不要填写完整的 `/chat/completions` 地址。程序启动时读取当前工作目录的 `config.properties`，修改后需重启；在 IDE 中运行时将工作目录设为项目根目录。API 配置只从文件读取。`config.properties` 已加入 Git 忽略规则，不打入 JAR，示例文件只保留空值。
+S01 只使用前三项，每次有效输入只请求模型一次，不声明工具、不执行命令。所有课程使用非流式 Chat Completions，模型请求超时 60 秒；输入 `exit`、`quit` 或 EOF 退出。
 
-后三项限制必须为正整数。已有的 `config.properties` 无需修改，会采用默认值。模型需支持 Chat Completions 的 `tools` / `tool_calls` 协议。
+S02 提供 `shell`、`read_file`、`write_file`、`edit_file`、`glob`；S03 加入逐次权限确认；S04 加入 `UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop`。`Stop` 仅表示本轮正常最终回复，超限、失败、中断和退出不触发。
 
-请求采用非流式 Chat Completions 协议，连接和单次请求超时均为 60 秒。模型请求失败时不会自动重试：尚未执行工具的本轮不保存；已经记录的工具调用和结果会保留，实际操作不会回滚。输入下一条消息即可继续。历史保存在内存，重启清空，当前未做截断或摘要。
+Windows Shell 使用 PowerShell，Unix 使用 `/bin/sh`。Shell 仍具有当前用户权限，工作区与文本规则不是系统沙箱。详细契约与练习见 [S01](docs/lessons/s01-agent-loop.md)、[S02](docs/lessons/s02-tool-use.md)、[S03](docs/lessons/s03-permission.md)、[S04](docs/lessons/s04-hooks.md)。
 
-达到调用上限时，最后一批工具不再执行，但每个调用仍补齐 `tool` 结果和终止原因，避免下一轮携带不完整的协议历史。工具参数错误、未知工具、非零退出码和命令超时会回传模型，模型可以在上限内继续处理。
+## 验证记录
 
-## 观察工具循环
+拆分前 S04 已提交为 `231f8c0`。拆分后的结果见 [实战规范](docs/JAVA_PRACTICE_SPEC.md#模块拆分验证)。旧工程的真实模型及构建记录已归档至 [历史规范](docs/history/pre-modules-spec.md)，不代表新模块已重新完成真实模型验收。
 
-启动后输入：
-
-```text
-列出当前练习目录的文件，读取 example.txt，并说明它的用途。
-```
-
-终端依次显示 `工具请求>`、`工具结果>` 和 `助手>`。默认练习目录是项目下的 `playground`。可以继续问“刚才读取了哪个文件？”观察历史保留。
-
-Windows 使用 `powershell.exe -NoProfile -NonInteractive`，Unix 使用 `/bin/sh`。每次调用启动独立进程，`cd` 和变量不会跨调用保留。标准输出和错误输出合并，超过长度限制后继续排空管道，仅保留前面的字符。超时或中断时尽力终止仍可枚举到的进程树；第一课不支持后台任务管理。PowerShell 输出设置为 UTF-8，外部程序也需要输出 UTF-8 才能正确解码。
-
-`shell` 会真实执行模型提出的命令，具有当前用户的权限。工作目录不是系统沙箱，命令仍可访问其他路径；S01、S02 不询问权限，S03、S04 有执行前规则和确认。
-
-## 从哪里读代码
-
-- `src/main/java/dev/learnagent/s01/AgentLoopMain.java`：加载配置，组装客户端和终端输入输出。
-- `src/main/java/dev/learnagent/s01/AgentConfig.java`：以 UTF-8 读取 `config.properties`，校验必填项。
-- `src/main/java/dev/learnagent/s01/ChatLoop.java`：本课重点，负责循环、历史和退出。
-- `src/main/java/dev/learnagent/s01/ModelClient.java`：模型调用入口，便于离线验证循环。
-- `src/main/java/dev/learnagent/s01/OpenAiClient.java`：构造 HTTP 请求，解析文本和 `tool_calls`，序列化 `tool_call_id`。
-- `src/main/java/dev/learnagent/s01/ChatMessage.java`：普通消息、模型工具调用消息和工具结果消息。
-- `src/main/java/dev/learnagent/s01/ToolCall.java`、`ToolDefinition.java`：模型请求执行的调用与程序提供的工具说明。
-- `src/main/java/dev/learnagent/s01/AgentTool.java`、`ShellTool.java`：工具执行接口及有超时、输出限制的 Shell 实现。
-- `src/test/java/dev/learnagent/s01/`：循环、本地 HTTP 协议和真实 Shell 测试，不调用真实模型。
-
-阅读[第一课讲解](docs/lessons/s01-agent-loop.md)了解工具循环及消息顺序；后续规划见[实战方案](docs/JAVA_PRACTICE_SPEC.md)。
-
-学习顺序为：对话循环 → 对话加工具 → 回传工具结果并多次请求模型。当前代码包含三个步骤的完整能力；`agent.max-model-calls` 限制每条用户消息触发的模型请求次数，不是一次回复中的工具调用数量。
-
-## 第二课：Tool Use
-
-入口为 `dev.learnagent.s02.ToolUseMain`。沿用根目录 `config.properties`，无需新增配置项。`shell.timeout-seconds` 和 `shell.max-output-chars` 仍仅控制 Shell。
-
-| 工具 | 参数 | 行为 |
-| --- | --- | --- |
-| `shell` | `command` | 复用 S01 的 Shell 执行 |
-| `read_file` | `path`，可选正整数 `limit` | 读取 UTF-8 文本，`limit` 表示前几行 |
-| `write_file` | `path`、`content` | 创建父目录并写入文件，覆盖已有内容，可写空文件 |
-| `edit_file` | `path`、`old_text`、`new_text` | 只替换首次精确匹配；找不到或 `old_text` 为空时不修改 |
-| `glob` | `pattern` | 按路径模式查找；`**/*.txt` 包含根目录和各级子目录 |
-
-文件工具检查规范化路径和已有祖先的真实路径，拒绝越出工作目录；`glob` 不递归进入目录链接或 Windows junction。读取和编辑的源文件、写入后的内容最多 1 MiB；读取结果最多 12000 个内容字符；查找按相对路径排序，最多返回 200 条，并标注截断。路径模式使用 `/` 分隔，支持 `*`、`?`、独立路径段 `**` 以及 JDK 单路径段 glob 语法。
-
-这些检查不是系统沙箱，不防御其他进程并发替换路径或硬链接；Shell 仍具有当前用户权限。S03 在这些检查之外增加许可规则。
-
-启动 S02 后可输入：
-
-```text
-在 s02-demo/notes.txt 写入“第一版”，把“第一版”改为“第二版”，读取文件验证，再查找 s02-demo 下的 txt 文件。请使用专用文件工具。
-```
-
-阅读顺序：`s02/ToolUseMain.java` 组装五个工具 → `s01/ToolRegistry.java` 注册和分派 → `s02` 的四个 `*Tool.java` 及 `WorkspaceFiles.java` → 原有 `s01/ChatLoop.java` 观察工具结果回传。文件工具位于 `src/main/java/dev/learnagent/s02/`，测试位于对应测试包。
-
-S02 在 S01 上增量开发，共用原有 `ChatLoop`、配置、模型客户端、消息协议和 Shell。原循环通过 `ToolRegistry` 从单工具扩展到多工具，S01 入口只注册 Shell，S02 入口再注册四个文件工具；两课共用一份循环实现。详见[第二课讲解与练习](docs/lessons/s02-tool-use.md)。
-
-## 第三课：Permission
-
-入口为 `dev.learnagent.s03.PermissionMain`，复用 S02 的五个工具及同一份 `s01.ChatLoop`，在 `ToolRegistry` 执行工具前检查权限。沿用已有配置，没有新增配置项。
-
-| 调用 | 默认行为 |
-| --- | --- |
-| 工作目录内的 `read_file`、`glob` | 直接执行 |
-| `write_file`、`edit_file` | 显示完整参数，逐次询问 |
-| `shell` | 命中硬拒绝规则则拒绝，其余逐次询问 |
-| 文件路径越界，或无法完成权限检查 | 拒绝，不执行工具 |
-
-确认只接受 `y` / `yes`（忽略大小写及首尾空白），其余输入、空行或 EOF 均拒绝。批准只针对本次调用，确认答案不进入聊天历史。拒绝仍按原调用 ID 回传模型。确认处的 `exit` / `quit` 表示拒绝当前调用；回到 `你>` 后输入才退出对话。
-
-可以先要求“只用 write_file 在 s03-demo/note.txt 写入第一版，被拒绝就停止”，输入 `n` 观察未执行；下一轮重新明确请求并输入 `y`。再用 `read_file` 验证内容，读取无需确认。
-
-硬拒绝是示例关键词/正则规则，可能误报且不能完整识别 Shell；授权 Shell 后仍以当前用户权限执行，不构成系统沙箱。规则代码位于 `s03/PermissionPolicy.java`，终端确认位于 `PermissionGate.java`。详见[第三课原理与练习](docs/lessons/s03-permission.md)。
-
-## 第四课：Hooks
-
-入口为 `dev.learnagent.s04.HooksMain`。Hook 相关接口、分派器和示例实现全部放在 `s04` 包，沿用已有配置。
-
-| 事件 | 方法 | 时机 |
-| --- | --- | --- |
-| `UserPromptSubmit` | `userPromptSubmit` | 有效用户提示词写入历史、请求模型之前 |
-| `PreToolUse` | `preToolUse` | 工具调用前，早于 S03 权限检查 |
-| `PostToolUse` | `postToolUse` | 工具产生结果后、回传模型之前 |
-| `Stop` | `stop` | 本轮最终回复保存并输出后 |
-
-“任务完成”指模型返回不含工具调用的最终回复；调用超限、失败、超时、中断和退出不触发完成事件。空输入与退出不触发提示词事件，权限确认的 `y/n` 也不属于新提示词。
-
-默认注册 `LoggingHook` 展示四类事件，已移除 `ProtectedPathHook`。前置回调可拒绝本次提交或工具调用；后置回调异常只警告，保留原结果。S03 权限规则继续生效。
-
-自定义 Java 类实现 `s04.AgentHook`，覆盖需要的方法，在 `HooksMain.createLoop(config, client, input, output, callbacks)` 中注册一次即可。`AgentHooks` 由原有 `ChatLoop` 和 `ToolRegistry` 共用；S01—S03 默认使用空事件链。
-
-启动后输入“你好”，观察 `UserPromptSubmit → 最终回复 → Stop`；请求读取文件时，观察中间增加的 `PreToolUse → PostToolUse`。详见[第四课原理、自定义 Hook 与练习](docs/lessons/s04-hooks.md)。本课不包含外部脚本或配置文件加载 Hook。
-
-## 验证边界
-
-2026-10-20 使用 JDK 17.0.2 和 Maven Wrapper 3.9.3 完成 `package`，55 项自动测试全部通过，普通 JAR 构建成功。自动测试使用模拟模型、本地 HTTP 服务和临时目录中的真实 Shell，验证协议和程序行为。
-
-本地配置的真实模型已通过“列出目录、读取中文练习文件 → 工具结果回传 → 最终回答 → 历史追问 → 退出”的验收。Windows PowerShell 已在本机验证；Unix 分支尚未在本机运行。详见 [S01 收尾验证记录](docs/JAVA_PRACTICE_SPEC.md#s01-收尾验证记录)。
-
-2026-10-20 S02 完成后再次执行 `package`：共 102 项测试，101 项通过、1 项跳过，无失败或错误。跳过项需要 Windows 符号链接权限；Windows junction 越界检查已实际通过。真实模型完成“写入中文文件 → 精确编辑 → 读回 → glob 查找 → 历史追问 → 退出”。S01 原启动命令也已验证。详见 [S02 验证记录](docs/JAVA_PRACTICE_SPEC.md#s02-验证记录)。
-
-同日 S03 完成后执行 `package`：共 154 项测试，153 项通过、1 项因符号链接权限跳过，无失败或错误。真实模型通过“拒绝写入且文件不存在 → 批准新文件写入 → 无确认读取 → 退出”，S01 / S02 入口均正常。详见 [S03 验证记录](docs/JAVA_PRACTICE_SPEC.md#s03-验证记录)。
-
-同日 S04 调整为四类事件后执行 `package`：共 190 项测试，189 项通过、1 项因符号链接权限跳过，无失败或错误。S04 的 36 项覆盖事件顺序、提示词记录前拦截、完成边界、自定义回调、权限与异常。S01—S04 入口均已验证启动与退出；S04 尚未调用真实模型服务验收。详见 [S04 验证记录](docs/JAVA_PRACTICE_SPEC.md#s04-验证记录)。
+2026-10-20 干净构建通过：四课共 470 项测试，467 通过、3 项因 Windows 符号链接权限跳过，无失败或错误。四个模块分别在根目录选课、子工程目录内独立打包和启动退出均通过；本次没有请求真实模型服务。

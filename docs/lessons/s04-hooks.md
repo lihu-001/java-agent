@@ -1,6 +1,6 @@
 # S04：四个常用 Hook
 
-本课基于 S03 增量实现四类事件：用户提示词记录前、工具调用前、工具调用后、任务完成后。入口为 `dev.learnagent.s04.HooksMain`，沿用已有配置和五个工具。
+本课在独立 s04 子工程中基于 S03 阶段源码增量实现四类事件：用户提示词记录前、工具调用前、工具调用后、任务完成后。入口为 `dev.learnagent.s04.HooksMain`，沿用已有配置和五个工具。
 
 ## 1. 四个事件及其时机
 
@@ -36,25 +36,25 @@
 
 ## 2. 类的位置和职责
 
-Hook 相关类全部在 `src/main/java/dev/learnagent/s04/` 下：
+Hook 接口和实现位于 `s04/src/main/java/dev/learnagent/s04/hook/`，默认入口仍在根包：
 
 - `AgentHook`：四个事件的接口；每个方法都有默认空实现，只需覆盖关心的事件。
 - `AgentHooks`：保存有序回调列表，统一处理前置短路、不可变消息快照和后置异常隔离。
 - `LoggingHook`：四类事件的默认日志示例。
 - `HooksMain`：组装模型客户端、S03 权限和同一条 Hook 链；提供自定义注册入口。
 
-`s01.ChatLoop` 在用户消息记录前和正常结束后触发事件；`s01.ToolRegistry` 触发工具前后事件。两个触发点共用同一个 `AgentHooks` 实例，没有复制对话循环。S01—S03 的旧构造方法默认使用空事件链，运行入口继续可用。
+`s04.loop.ChatLoop` 在用户消息记录前和正常结束后触发事件；`s04.tool.ToolRegistry` 触发工具前后事件。两个触发点共用同一个 `AgentHooks` 实例。本课修改自己的循环，不影响前面课程。S01—S03 有各自源码，不包含 Hook 类；本模块基础构造方法默认使用空事件链。
 
 默认仅注册日志示例，已移除之前的 `ProtectedPathHook`。`protected/` 不再具有 S04 特殊规则，文件写入仍遵循 S03 逐次权限确认和 S02 工作区边界。
 
 ## 3. 如何自定义 Hook
 
-自定义 Java 类实现 `s04.AgentHook`，覆盖任意方法即可。例如，阻止空白字符以外仅含“取消”的提交，并在每轮完成后处理最终回复：
+自定义 Java 类实现 `s04.hook.AgentHook`，覆盖任意方法即可。例如，新建 `s04/src/main/java/dev/learnagent/s04/hook/MyHook.java`，阻止内容为“取消”的提交，并在每轮完成后处理最终回复：
 
 ```java
-package dev.learnagent.s04;
+package dev.learnagent.s04.hook;
 
-import dev.learnagent.s01.ChatMessage;
+import dev.learnagent.s04.model.ChatMessage;
 import java.util.List;
 
 public final class MyHook implements AgentHook {
@@ -71,7 +71,7 @@ public final class MyHook implements AgentHook {
 }
 ```
 
-在 `HooksMain` 的默认 `createLoop` 中，将注册列表改为：
+在 `HooksMain` 中导入 `dev.learnagent.s04.hook.MyHook`，然后在默认 `createLoop` 中将注册列表改为：
 
 ```java
 return createLoop(config, client, input, output,
@@ -109,7 +109,7 @@ HooksMain.createLoop(config, client, input, output,
 ## 5. 运行与观察
 
 ```powershell
-.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s04.HooksMain"
+.\mvnw.cmd -pl s04 -q compile exec:java
 ```
 
 输入“你好”，如果模型直接回答，日志顺序为：
@@ -144,8 +144,8 @@ PreToolUse(read_file) → 实际读取 → PostToolUse(read_file)
 ## 6. 自动验证
 
 ```powershell
-.\mvnw.cmd clean test "-Dtest=dev.learnagent.s04.*Test"
-.\mvnw.cmd package
+.\mvnw.cmd -pl s04 test "-Dtest=HookRegistryTest,HooksLoopTest,LifecycleHooksTest"
+.\mvnw.cmd -pl s04 package
 ```
 
 | 测试类 | 数量 | 验证重点 |
@@ -154,4 +154,4 @@ PreToolUse(read_file) → 实际读取 → PostToolUse(read_file)
 | `HooksLoopTest` | 4 | 混合调用 ID、拒绝不写入、逐次确认、调用上限及后置异常 |
 | `LifecycleHooksTest` | 16 | 四事件全链路、记录前时机、消息快照、完成事件边界及自定义注册 |
 
-2026-10-20：S04 共 36 项全部通过；全量打包共 190 项，189 项通过、1 项因 Windows 符号链接权限跳过，无失败或错误。测试使用模拟模型、临时文件和原有本地 HTTP 协议测试。S04 尚未请求真实模型服务验收。
+2026-10-20：S04 共 36 项全部通过；S04 独立模块全量打包共 190 项，189 项通过、1 项因 Windows 符号链接权限跳过，无失败或错误。测试使用模拟模型、临时文件和原有本地 HTTP 协议测试。S04 尚未请求真实模型服务验收。
