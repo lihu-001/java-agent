@@ -2,11 +2,13 @@
 
 ## 项目结构与模块组织
 
-当前实现 `dev.learnagent.s01` 的对话与 Shell 工具调用循环，入口为 `AgentLoopMain`。`src/main/java` 放应用代码，`src/test/java` 放测试，按需使用 `src/main/resources` 放配置和资源。按课次划分包，测试包路径与被测代码一致。新增模块时，在根目录 README 说明模块职责和入口。扩展课程前阅读 `docs/JAVA_PRACTICE_SPEC.md` 的当前范围。
+当前实现 `dev.learnagent.s01` 的对话与 Shell 工具调用循环，入口为 `AgentLoopMain`；`dev.learnagent.s02` 新增文件工具与工具分派，入口为 `ToolUseMain`。`src/main/java` 放应用代码，`src/test/java` 放测试，按需使用 `src/main/resources` 放配置和资源。按课次划分包，测试包路径与被测代码一致。新增模块时，在根目录 README 说明模块职责和入口。扩展课程前阅读 `docs/JAVA_PRACTICE_SPEC.md` 的当前范围。
+
+后续课次基于已有实现增量开发，不复制完整循环。S02 共用并扩展 `s01.ChatLoop`，通过 `s01.ToolRegistry` 注册文件工具；原课次入口继续可用。
 
 ## 构建、测试与本地开发
 
-使用 JDK 17 和 Maven。`mvn test` 运行测试，`mvn package` 构建普通 JAR，`mvn -q compile exec:java` 启动第一课。Windows 可将 `mvn` 替换为 `.\mvnw.cmd` 使用项目包装器。真实模型配置见 README，自动测试无需 API 密钥。
+使用 JDK 17 和 Maven。`mvn test` 运行测试，`mvn package` 构建普通 JAR，`mvn -q compile exec:java` 启动第一课，加上 `"-Dexec.mainClass=dev.learnagent.s02.ToolUseMain"` 启动第二课。Windows 可将 `mvn` 替换为 `.\mvnw.cmd` 使用项目包装器。真实模型配置见 README，自动测试无需 API 密钥。
 
 ## 编码风格与命名
 

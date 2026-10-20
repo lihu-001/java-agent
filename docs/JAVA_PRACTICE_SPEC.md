@@ -1,6 +1,6 @@
 # 用 Java 实战 Learn Claude Code
 
-状态：按逐步实战推进；已选择 OpenAI 兼容接口。s01 的对话与 Shell 工具调用循环已完成 Windows 本机测试、打包和真实模型验收，尚未进入 s02。
+状态：按逐步实战推进；已选择 OpenAI 兼容接口。s01 已完成 Windows 本机测试、打包和真实模型验收；s02 已实现文件读写、编辑、查找与工具分派，验证记录见文末。
 
 ## 目标与现状
 
@@ -23,7 +23,7 @@
 
 ## 课程范围
 
-以下为完整课程的规划；当前实现 s01 的多轮对话和 Shell 工具循环，其余内容待逐步推进。
+以下为完整课程的规划；当前实现 s01 的多轮对话和 Shell 工具循环及 s02 的文件工具与分派，其余内容待逐步推进。
 
 | 课次 | 主题 | Java 实战产出 |
 | --- | --- | --- |
@@ -54,11 +54,14 @@ pom.xml
 mvnw / mvnw.cmd / .mvn/wrapper/
 src/main/java/dev/learnagent/s01/   # 第一课入口与循环
 src/test/java/dev/learnagent/s01/   # 第一课行为测试
+src/main/java/dev/learnagent/s02/   # 第二课入口、工具分派和文件工具
+src/test/java/dev/learnagent/s02/   # 文件工具、循环和 HTTP 集成测试
 docs/lessons/s01-agent-loop.md     # 原理、运行步骤与练习
+docs/lessons/s02-tool-use.md       # 第二课讲解、工具约定与练习
 playground/                       # 练习工作目录
 ```
 
-后续课程使用 `s02`、`s03` 等独立包。只有出现实际复用需求时再提取公共组件，保留早期课程的可读性和独立运行方式。
+后续课程使用 `s02`、`s03` 等包放新增能力，并在已有实现上增量扩展，不复制完整循环。S02 已直接复用并扩展 S01 的 `ChatLoop`，通过注册表注入工具。只有出现实际复用需求时再提取公共组件，保留早期课程的可读性和独立运行方式。
 
 ## 第一课范围与验收
 
@@ -89,12 +92,13 @@ S01 按用户确认的三个步骤推进：先对话循环，再对话加工具�
 
 ## 当前命令
 
-以下命令用于构建、测试和运行当前第一课：
+以下命令用于构建、测试和运行已实现的课程：
 
 ```powershell
 .\mvnw.cmd test
 .\mvnw.cmd package
 .\mvnw.cmd -q compile exec:java
+.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s02.ToolUseMain"
 ```
 
 运行前填写项目根目录的 `config.properties`，包含 `openai.base-url`、`openai.model` 和 `openai.api-key`，具体说明见根目录 README。配置以 UTF-8 读取，不使用 API 环境变量。本地配置文件已加入 Git 忽略规则；密钥不出现在示例、日志或提交中。
@@ -113,7 +117,7 @@ record ToolResult(String callId, String output, boolean error) {}
 
 始终：保留已完成课程的运行方式；记录与上游的差异；运行所改行为的测试；真实调用与模拟结果分别说明。
 
-已确认：逐步实现，OpenAI 兼容接口，本次完成第一课工具调用。后续如要变更 Java 主版本或改为 Web 应用，再讨论范围。
+已确认：逐步实现，OpenAI 兼容接口，当前推进至第二课工具使用。后续如要变更 Java 主版本或改为 Web 应用，再讨论范围。
 
 禁止：提交密钥、将未运行的命令标记为验证通过、将简单命令过滤描述成可靠沙箱。
 
@@ -158,3 +162,52 @@ $env:JAVA_HOME = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
 首次联调发现 PowerShell 模块初始化的进度 XML 混入输出；在 Shell 启动脚本中设置 `$ProgressPreference = 'SilentlyContinue'` 后，重新通过全部测试、打包及上述真实模型流程，最终工具输出不再夹带该 XML。
 
 此次真实验收覆盖基本工具闭环和连续对话；多工具调用 ID、错误路径、超时及调用上限由离线测试覆盖。Windows 范围内 S01 收尾完成，未进入 S02。
+
+## S02 验证记录
+
+日期：2026-10-20。环境：Windows PowerShell、JDK 17.0.2、Maven Wrapper 3.9.3。
+
+已实现 `dev.learnagent.s02.ToolUseMain` 入口，新增 `read_file`、`write_file`、`edit_file`、`glob`。在原有 `s01.ChatLoop` 上增加工具注册表和提示词参数，以 `s01.ToolRegistry` 替换单工具分派；S01 与 S02 共用这一份循环、配置、协议、HTTP 客户端和 Shell。循环仍按“保存 assistant → 顺序执行工具 → 按 ID 补齐 tool → 再请求模型”推进。S01 的单工具构造方式和默认入口保留。讲解见 [s02-tool-use.md](lessons/s02-tool-use.md)。
+
+### 自动测试与构建
+
+共用原有循环后，仅在验证进程中选择系统级 JDK 17，然后执行干净构建，避免旧的重复类残留：
+
+```powershell
+$env:JAVA_HOME = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
+.\mvnw.cmd clean package
+```
+
+结果为 `BUILD SUCCESS`，生成普通 JAR。共 102 项测试，101 项通过，1 项跳过，失败和错误均为 0。
+
+| 测试范围 | 数量 | 结果 |
+| --- | --- | --- |
+| S01 原有四个测试类 | 55 | 全部通过 |
+| S02 `ChatLoopTest` | 7 | 全部通过 |
+| S02 `FileToolsTest` | 36 | 35 通过，1 跳过 |
+| 共用 `s01.ToolRegistryTest` | 3 | 全部通过 |
+| S02 `ToolUseProtocolTest` | 1 | 通过 |
+
+文件测试覆盖中文及空内容、覆盖写入、首次精确替换、换行保留、无匹配不修改、严格参数校验、目录及缺失文件、大小限制、非法 UTF-8、相对与绝对越界路径、glob 的零层及多层匹配、排序与截断。
+
+符号链接测试因本机权限不足而跳过，不能视为验证通过。单独创建 Windows 目录 junction 验证了读取、编辑、经已有链接新建文件的越界拒绝及 glob 排除，测试通过并清理了链接。
+
+循环测试覆盖不同工具同批执行的顺序与调用 ID、错误修正、文件写入后的 HTTP 失败及历史保留、调用上限避免最后一批写入、退出与中断。本地 HTTP 集成测试使用真实 `OpenAiClient`，验证五个工具 Schema 和写入→编辑→读取→查找结果的协议回传，未请求外部 API。
+
+### 真实模型验收
+
+以下为文件工具实现后的真实模型验收记录；循环合并后重新通过上述离线及本地 HTTP 测试，并验证两个入口启动与退出，没有重复请求真实服务商。真实验收使用已有 `config.properties`，未修改模型配置或记录密钥，运行：
+
+```powershell
+.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s02.ToolUseMain"
+```
+
+1. 要求仅用四个文件工具操作新建的 `s02-check-69ec73b4/notes.txt`，不调用 Shell 或访问其他文件。
+2. `write_file` 写入“第一版”，返回 9 个 UTF-8 字节；`edit_file` 将其替换为“第二版”。
+3. `read_file` 返回“第二版”；`glob` 使用 `s02-check-69ec73b4/**/*.txt` 找到该文件，验证 `**` 匹配零层子目录。
+4. 模型依据工具结果总结成功；继续追问后，未再调用工具，正确回答文件路径和最终内容。
+5. 输入 `exit` 正常结束，进程退出码为 0。验收临时文件读回确认后清理。
+
+另外以 `exit` 输入运行原 S01 启动命令，确认仍显示第一课工具并正常退出。
+
+本次真实验收只代表本地配置服务商的基本文件工具闭环成功；错误恢复与多工具同批协议由离线测试验证。Unix 分支及需要权限的符号链接测试尚未在本机验证。当前范围截至 S02，未实现 S03 许可机制。

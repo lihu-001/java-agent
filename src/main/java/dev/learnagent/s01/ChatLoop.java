@@ -12,30 +12,40 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class ChatLoop {
+    private static final String DEFAULT_SYSTEM_PROMPT = "你是一个编程助手，请用中文回答。需要操作或查看环境时使用 shell 工具，"
+            + "根据真实工具结果回答。工具错误可修正后再次调用，不要把失败描述为成功。";
     private final ModelClient client;
-    private final AgentTool tool;
+    private final ToolRegistry registry;
     private final int maxModelCalls;
+    private final String systemPrompt;
 
     public ChatLoop(ModelClient client) {
         this(client, new ShellTool(Path.of("playground"), Duration.ofSeconds(30), 12000), 10);
     }
 
     public ChatLoop(ModelClient client, AgentTool tool, int maxModelCalls) {
+        this(client, new ToolRegistry(List.of(tool)), maxModelCalls, DEFAULT_SYSTEM_PROMPT);
+    }
+
+    // S02 在原循环上扩展工具注册与提示词；S01 的单工具构造方式继续可用。
+    public ChatLoop(ModelClient client, ToolRegistry registry, int maxModelCalls, String systemPrompt) {
         if (maxModelCalls <= 0) {
             throw new IllegalArgumentException("每轮模型调用上限必须为正数");
         }
         this.client = client;
-        this.tool = tool;
+        this.registry = registry;
         this.maxModelCalls = maxModelCalls;
+        this.systemPrompt = systemPrompt;
     }
 
     public void run(BufferedReader input, PrintWriter output) throws IOException {
         List<ChatMessage> history = new ArrayList<>();
-        history.add(new ChatMessage("system", "你是一个编程助手，请用中文回答。需要操作或查看环境时使用 shell 工具，"
-                + "根据真实工具结果回答。工具错误可修正后再次调用，不要把失败描述为成功。"));
-        List<ToolDefinition> definitions = List.of(tool.definition());
+        history.add(new ChatMessage("system", systemPrompt));
+        List<ToolDefinition> definitions = registry.definitions();
         output.println("对话已启动，输入 exit 或 quit 退出。每次输入可触发多次工具调用。");
-        output.println("工具> " + tool.definition().description());
+        for (ToolDefinition definition : definitions) {
+            output.println("工具> " + definition.name() + "：" + definition.description());
+        }
         while (true) {
             output.print("你> ");
             output.flush();
@@ -69,7 +79,7 @@ public final class ChatLoop {
                         output.println("工具请求> " + call.name() + " [" + call.id() + "] " + call.arguments());
                         output.flush();
                         String result = limitReached ? "工具未执行：已达到本轮模型调用上限。"
-                                : executeTool(call);
+                                : registry.execute(call);
                         request.add(ChatMessage.tool(call.id(), result));
                         output.println("工具结果> [" + call.id() + "] " + result);
                         output.flush();
@@ -93,17 +103,6 @@ public final class ChatLoop {
                 return;
             }
             output.flush();
-        }
-    }
-
-    private String executeTool(ToolCall call) throws InterruptedException {
-        if (!tool.definition().name().equals(call.name())) {
-            return "工具错误：未知工具 " + call.name();
-        }
-        try {
-            return tool.execute(call.arguments());
-        } catch (IOException e) {
-            return "工具错误：命令执行或输出读取失败（" + e.getClass().getSimpleName() + "）。";
         }
     }
 

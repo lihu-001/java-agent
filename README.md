@@ -1,8 +1,8 @@
 # Java Agent 实战
 
-当前实现第一课（s01）的 Agent Loop：通过 OpenAI 兼容接口对话，模型可调用 `shell`，程序执行命令并回传结果，再请求模型，直到模型给出最终回答。支持一次回复中的多个工具调用，按返回顺序执行。输入 `exit`、`quit` 或遇到输入结束时退出。
+当前实现 s01 Agent Loop 和 s02 Tool Use：通过 OpenAI 兼容接口对话，程序执行模型请求的工具并回传结果，再请求模型，直到给出最终回答。支持一次回复中的多个工具调用，按返回顺序执行。输入 `exit`、`quit` 或遇到输入结束时退出。
 
-使用 JDK 17、Maven、Hutool 和 fastjson2。第一课只提供 `shell`；独立的文件读写工具和工具分派体系留到 s02。
+使用 JDK 17、Maven、Hutool 和 fastjson2。s01 只提供 `shell`；s02 新增文件读写、编辑、查找和按名称分派工具的注册表。
 
 ## 构建与启动
 
@@ -21,6 +21,9 @@ openai.api-key=你的密钥
 .\mvnw.cmd package
 
 .\mvnw.cmd -q compile exec:java
+
+# 第二课（引号保证 PowerShell 正确传递 Maven 属性）
+.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s02.ToolUseMain"
 ```
 
 也可直接使用已安装的 Maven，例如 `mvn test`、`mvn package`、`mvn -q compile exec:java`。Wrapper 固定 Maven 3.9.3，首次运行需联网下载 Maven 和依赖。`package` 生成普通 JAR，运行时通过 `exec:java` 加载依赖。
@@ -30,7 +33,7 @@ openai.api-key=你的密钥
 | `openai.base-url` | 服务商的 API 基础地址，保留其要求的路径前缀；程序追加 `/chat/completions` | 省略时使用 `https://api.openai.com/v1` |
 | `openai.model` | 服务商支持的模型 ID | 必填 |
 | `openai.api-key` | API 密钥，仅在本地设置 | 必填 |
-| `agent.work-dir` | Shell 工作目录；相对路径以程序启动目录为基准，不存在时自动创建 | `playground` |
+| `agent.work-dir` | Shell 及 S02 文件工具的工作目录；相对路径以程序启动目录为基准，不存在时自动创建 | `playground` |
 | `agent.max-model-calls` | 每次用户输入最多请求模型的次数，包含最终回答请求 | `10` |
 | `shell.timeout-seconds` | 每条 Shell 命令的超时秒数 | `30` |
 | `shell.max-output-chars` | 每条命令保留的输出字符数（不含状态和截断提示） | `12000` |
@@ -73,8 +76,36 @@ Windows 使用 `powershell.exe -NoProfile -NonInteractive`，Unix 使用 `/bin/s
 
 学习顺序为：对话循环 → 对话加工具 → 回传工具结果并多次请求模型。当前代码包含三个步骤的完整能力；`agent.max-model-calls` 限制每条用户消息触发的模型请求次数，不是一次回复中的工具调用数量。
 
+## 第二课：Tool Use
+
+入口为 `dev.learnagent.s02.ToolUseMain`。沿用根目录 `config.properties`，无需新增配置项。`shell.timeout-seconds` 和 `shell.max-output-chars` 仍仅控制 Shell。
+
+| 工具 | 参数 | 行为 |
+| --- | --- | --- |
+| `shell` | `command` | 复用 S01 的 Shell 执行 |
+| `read_file` | `path`，可选正整数 `limit` | 读取 UTF-8 文本，`limit` 表示前几行 |
+| `write_file` | `path`、`content` | 创建父目录并写入文件，覆盖已有内容，可写空文件 |
+| `edit_file` | `path`、`old_text`、`new_text` | 只替换首次精确匹配；找不到或 `old_text` 为空时不修改 |
+| `glob` | `pattern` | 按路径模式查找；`**/*.txt` 包含根目录和各级子目录 |
+
+文件工具检查规范化路径和已有祖先的真实路径，拒绝越出工作目录；`glob` 不递归进入目录链接或 Windows junction。读取和编辑的源文件、写入后的内容最多 1 MiB；读取结果最多 12000 个内容字符；查找按相对路径排序，最多返回 200 条，并标注截断。路径模式使用 `/` 分隔，支持 `*`、`?`、独立路径段 `**` 以及 JDK 单路径段 glob 语法。
+
+这些检查不是系统沙箱，不防御其他进程并发替换路径或硬链接；Shell 仍具有当前用户权限。许可规则留到 S03。
+
+启动 S02 后可输入：
+
+```text
+在 s02-demo/notes.txt 写入“第一版”，把“第一版”改为“第二版”，读取文件验证，再查找 s02-demo 下的 txt 文件。请使用专用文件工具。
+```
+
+阅读顺序：`s02/ToolUseMain.java` 组装五个工具 → `s01/ToolRegistry.java` 注册和分派 → `s02` 的四个 `*Tool.java` 及 `WorkspaceFiles.java` → 原有 `s01/ChatLoop.java` 观察工具结果回传。文件工具位于 `src/main/java/dev/learnagent/s02/`，测试位于对应测试包。
+
+S02 在 S01 上增量开发，共用原有 `ChatLoop`、配置、模型客户端、消息协议和 Shell。原循环通过 `ToolRegistry` 从单工具扩展到多工具，S01 入口只注册 Shell，S02 入口再注册四个文件工具；两课共用一份循环实现。详见[第二课讲解与练习](docs/lessons/s02-tool-use.md)。
+
 ## 验证边界
 
 2026-10-20 使用 JDK 17.0.2 和 Maven Wrapper 3.9.3 完成 `package`，55 项自动测试全部通过，普通 JAR 构建成功。自动测试使用模拟模型、本地 HTTP 服务和临时目录中的真实 Shell，验证协议和程序行为。
 
 本地配置的真实模型已通过“列出目录、读取中文练习文件 → 工具结果回传 → 最终回答 → 历史追问 → 退出”的验收。Windows PowerShell 已在本机验证；Unix 分支尚未在本机运行。详见 [S01 收尾验证记录](docs/JAVA_PRACTICE_SPEC.md#s01-收尾验证记录)。
+
+2026-10-20 S02 完成后再次执行 `package`：共 102 项测试，101 项通过、1 项跳过，无失败或错误。跳过项需要 Windows 符号链接权限；Windows junction 越界检查已实际通过。真实模型完成“写入中文文件 → 精确编辑 → 读回 → glob 查找 → 历史追问 → 退出”。S01 原启动命令也已验证。详见 [S02 验证记录](docs/JAVA_PRACTICE_SPEC.md#s02-验证记录)。
