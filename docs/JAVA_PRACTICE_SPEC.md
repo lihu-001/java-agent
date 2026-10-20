@@ -1,6 +1,6 @@
 # 用 Java 实战 Learn Claude Code
 
-状态：按逐步实战推进；已选择 OpenAI 兼容接口。已实现 s01 对话循环、s02 文件工具与分派、s03 权限规则和逐次确认，验证记录见文末。
+状态：按逐步实战推进；已选择 OpenAI 兼容接口。已实现 s01 对话循环、s02 文件工具与分派、s03 权限规则和逐次确认、s04 提示词记录前、工具调用前后和任务完成后四类钩子，验证记录见文末。
 
 ## 目标与现状
 
@@ -23,14 +23,14 @@
 
 ## 课程范围
 
-以下为完整课程的规划；当前实现至 s03，三课基于同一循环增量扩展，其余内容待逐步推进。
+以下为完整课程的规划；当前实现至 s04，四课基于同一循环增量扩展，其余内容待逐步推进。S04 已完成自动验证，真实模型验收尚未执行。
 
 | 课次 | 主题 | Java 实战产出 |
 | --- | --- | --- |
 | s01 | Agent Loop | 能调用 Shell 并继续对话的最小循环 |
 | s02 | Tool Use | 文件读写、编辑、查找和工具分派 |
 | s03 | Permission | 操作规则与许可决策 |
-| s04 | Hooks | 工具执行前后的扩展接口 |
+| s04 | Hooks | 提示词记录前、工具调用前后、任务完成后的四类扩展接口 |
 | s05 | TodoWrite | 可更新的步骤清单 |
 | s06 | Subagent | 拥有独立消息历史的子任务执行器 |
 | s07 | Skill Loading | 技能目录与按需加载 |
@@ -58,9 +58,12 @@ src/main/java/dev/learnagent/s02/   # 第二课入口、工具分派和文件工
 src/test/java/dev/learnagent/s02/   # 文件工具、循环和 HTTP 集成测试
 src/main/java/dev/learnagent/s03/   # 权限规则、确认器和第三课入口
 src/test/java/dev/learnagent/s03/   # 权限策略、确认及循环集成测试
+src/main/java/dev/learnagent/s04/   # 四类 Hook 接口、分派器、日志示例与入口
+src/test/java/dev/learnagent/s04/   # 钩子顺序、异常与循环集成测试
 docs/lessons/s01-agent-loop.md     # 原理、运行步骤与练习
 docs/lessons/s02-tool-use.md       # 第二课讲解、工具约定与练习
 docs/lessons/s03-permission.md     # 第三课原理、权限规则与练习
+docs/lessons/s04-hooks.md          # 第四课钩子原理、约定与练习
 playground/                       # 练习工作目录
 ```
 
@@ -103,6 +106,7 @@ S01 按用户确认的三个步骤推进：先对话循环，再对话加工具�
 .\mvnw.cmd -q compile exec:java
 .\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s02.ToolUseMain"
 .\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s03.PermissionMain"
+.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s04.HooksMain"
 ```
 
 运行前填写项目根目录的 `config.properties`，包含 `openai.base-url`、`openai.model` 和 `openai.api-key`，具体说明见根目录 README。配置以 UTF-8 读取，不使用 API 环境变量。本地配置文件已加入 Git 忽略规则；密钥不出现在示例、日志或提交中。
@@ -121,7 +125,7 @@ record ToolResult(String callId, String output, boolean error) {}
 
 始终：保留已完成课程的运行方式；记录与上游的差异；运行所改行为的测试；真实调用与模拟结果分别说明。
 
-已确认：逐步实现，先讲原理再基于已有代码实现，OpenAI 兼容接口，当前推进至第三课权限控制。后续如要变更 Java 主版本或改为 Web 应用，再讨论范围。
+已确认：逐步实现，先讲原理再基于已有代码实现，OpenAI 兼容接口，当前推进至第四课四类生命周期钩子。后续如要变更 Java 主版本或改为 Web 应用，再讨论范围。
 
 禁止：提交密钥、将未运行的命令标记为验证通过、将简单命令过滤描述成可靠沙箱。
 
@@ -266,3 +270,44 @@ $env:JAVA_HOME = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
 分别对 S01、S02 原启动命令提供 `exit`，两个入口均正常启动并结束。用户已有的学习笔记和 `playground/example.txt` 改动未修改。
 
 真实验收覆盖拒绝、单次批准及无确认读取；其他规则与协议边界由自动测试覆盖。Shell 权限规则是文本匹配而非沙箱；Unix 分支及受本机权限限制的符号链接测试未在本机验证。当前实现截至 S03，未进入 S04。
+
+## S04 验证记录
+
+日期：2026-10-20。环境：Windows PowerShell、JDK 17.0.2、Maven Wrapper 3.9.3。
+
+按用户指定范围实现四类事件：用户提示词记录前 `UserPromptSubmit`、工具调用前 `PreToolUse`、工具调用后 `PostToolUse`、任务完成后 `Stop`。Hook 相关类全部位于 `s04`：`AgentHook` 定义接口，`AgentHooks` 统一分派，`LoggingHook` 展示四类日志，`HooksMain.createLoop` 接收自定义 Java 回调列表。
+
+在原 `s01.ChatLoop` 增加提示词记录前和正常最终回复后的触发点，在 `s01.ToolRegistry` 增加工具前后触发点，共用同一条事件链。复用 S02 五个工具和 S03 权限规则，没有复制对话循环。旧构造方法使用空事件链，S01—S03 入口继续可用。
+
+默认只注册日志示例，移除先前的 `ProtectedPathHook`；`protected/` 不再具有额外规则。前置返回非 null 或 IO / 运行时异常时拒绝本次事件；后置失败保留原结果，继续其他回调。提示词被拒绝时不记录、不请求模型。完成事件仅在本轮正常最终回复保存并输出后触发，不将超限、失败、超时、中断或退出当成任务完成。消息以不可变快照提供给回调。
+
+本课支持代码注册的同步 Java Hook，不包含配置文件加载、外部脚本、异步调度或停止回调强制续跑。实现及示例见 [s04-hooks.md](lessons/s04-hooks.md)。
+
+### 自动测试与构建
+
+仅在当前验证进程选择系统级 JDK 17，没有修改持久环境变量：
+
+```powershell
+$env:JAVA_HOME = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
+.\mvnw.cmd clean test "-Dtest=dev.learnagent.s04.*Test"
+.\mvnw.cmd package
+```
+
+先清理旧编译产物，避免移除的类残留。S04 共 36 项测试全部通过。全量 `BUILD SUCCESS`，生成普通 JAR；共 190 项测试，189 项通过、1 项因 Windows 符号链接权限跳过，失败和错误均为 0。
+
+| 范围 | 数量 | 结果 |
+| --- | --- | --- |
+| S01—S03 原有测试 | 154 | 153 通过，1 跳过 |
+| `HookRegistryTest` | 16 | 全部通过 |
+| `HooksLoopTest` | 4 | 全部通过 |
+| `LifecycleHooksTest` | 16 | 全部通过 |
+
+验证四事件顺序及自定义回调一次注册、提示词记录前的历史快照、每轮完成快照隔离、前置拒绝不污染历史、空输入及退出不触发、权限确认不视作新提交、正常最终回复仅完成一次。另覆盖请求失败/超时、工具执行后的请求失败、调用超限、中断均不误报完成；后置异常保留结果和历史、继续后续回调；警告接收器故障不破坏事件链。
+
+工具集成仍使用模拟模型及临时目录内真实文件工具，覆盖混合调用 ID、拒绝无写入、逐次确认、权限不可绕过和后置失败后的结果回传。原有本地 HTTP 协议和 Shell 测试随全量构建通过。
+
+### 入口验证与真实模型边界
+
+分别向 S01—S04 的 `exec:java` 入口提供 `exit`，四个入口均正常启动并退出，进程退出码为 0。S04 展示四类事件和原有五个工具，退出不触发 `Stop`。
+
+本次没有请求外部模型 API，入口验证不能代替真实模型验收。S04 手动练习和自定义 Hook 注册示例已写入课程文档；Unix 分支及需要权限的符号链接测试未在本机验证。当前实现截至 S04，未进入 S05。

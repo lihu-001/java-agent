@@ -6,6 +6,8 @@
 
 `dev.learnagent.s03` 在 S02 工具注册表上增加权限规则与终端确认，入口为 `PermissionMain`；三课共用 `s01.ChatLoop`。
 
+`dev.learnagent.s04` 提供四类钩子：用户提示词记录前 `UserPromptSubmit`、工具调用前 `PreToolUse`、工具调用后 `PostToolUse`、任务完成后 `Stop`，入口为 `HooksMain`。Hook 相关类全部放在 `s04`：`AgentHook` 定义接口，`AgentHooks` 统一分派，`LoggingHook` 为默认示例。四课共用 `s01.ChatLoop`，通过 `HooksMain.createLoop` 注册一次自定义 Java Hook。前置放行仍需 S03 权限检查；后置异常不能覆盖结果。任务完成指本轮正常最终回复，超限、失败、中断和退出不触发 `Stop`。
+
 后续课次基于已有实现增量开发，不复制完整循环。S02 共用并扩展 `s01.ChatLoop`，通过 `s01.ToolRegistry` 注册文件工具；原课次入口继续可用。
 
 ## 构建、测试与本地开发
@@ -13,6 +15,8 @@
 使用 JDK 17 和 Maven。`mvn test` 运行测试，`mvn package` 构建普通 JAR，`mvn -q compile exec:java` 启动第一课，加上 `"-Dexec.mainClass=dev.learnagent.s02.ToolUseMain"` 启动第二课。Windows 可将 `mvn` 替换为 `.\mvnw.cmd` 使用项目包装器。真实模型配置见 README，自动测试无需 API 密钥。
 
 第三课使用 `"-Dexec.mainClass=dev.learnagent.s03.PermissionMain"`。权限测试中的危险命令仅作为待分类字符串，不能实际执行；执行测试使用临时文件和无副作用的 Shell 命令。
+
+第四课使用 `"-Dexec.mainClass=dev.learnagent.s04.HooksMain"`。仅运行第四课测试可使用 `.\mvnw.cmd "-Dtest=dev.learnagent.s04.*Test" test`，无需 API 密钥。
 
 ## 编码风格与命名
 

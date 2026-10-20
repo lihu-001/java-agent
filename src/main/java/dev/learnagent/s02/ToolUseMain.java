@@ -7,6 +7,8 @@ import dev.learnagent.s01.OpenAiClient;
 import dev.learnagent.s01.ShellTool;
 import dev.learnagent.s01.ToolRegistry;
 import dev.learnagent.s01.ToolPermission;
+import dev.learnagent.s04.AgentHook;
+import dev.learnagent.s04.AgentHooks;
 
 import java.io.BufferedReader;
 import java.io.Console;
@@ -17,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.function.Consumer;
 
 public final class ToolUseMain {
     public static final String SYSTEM_PROMPT = "你是一个编程助手，请用中文回答。"
@@ -32,11 +35,21 @@ public final class ToolUseMain {
     }
 
     public static ToolRegistry createTools(AgentConfig config, ToolPermission permission) throws IOException {
+        return createTools(config, permission, AgentHooks.empty());
+    }
+
+    public static ToolRegistry createTools(AgentConfig config, ToolPermission permission,
+                                          List<? extends AgentHook> hooks, Consumer<String> hookWarnings) throws IOException {
+        return createTools(config, permission, new AgentHooks(hooks, hookWarnings));
+    }
+
+    public static ToolRegistry createTools(AgentConfig config, ToolPermission permission,
+                                          AgentHooks hooks) throws IOException {
         WorkspaceFiles files = new WorkspaceFiles(config.workDirectory());
         return new ToolRegistry(List.of(
                 new ShellTool(files.root(), config.shellTimeout(), config.maxOutputChars()),
                 new ReadFileTool(files), new WriteFileTool(files), new EditFileTool(files), new GlobTool(files)),
-                permission);
+                permission, hooks);
     }
 
     public static void main(String[] args) {

@@ -1,6 +1,7 @@
 package dev.learnagent.s01;
 
 import cn.hutool.core.util.StrUtil;
+import dev.learnagent.s04.AgentHooks;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -10,6 +11,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 public final class ChatLoop {
     private static final String DEFAULT_SYSTEM_PROMPT = "你是一个编程助手，请用中文回答。需要操作或查看环境时使用 shell 工具，"
@@ -18,6 +20,7 @@ public final class ChatLoop {
     private final ToolRegistry registry;
     private final int maxModelCalls;
     private final String systemPrompt;
+    private final AgentHooks hooks;
 
     public ChatLoop(ModelClient client) {
         this(client, new ShellTool(Path.of("playground"), Duration.ofSeconds(30), 12000), 10);
@@ -29,6 +32,11 @@ public final class ChatLoop {
 
     // S02 在原循环上扩展工具注册与提示词；S01 的单工具构造方式继续可用。
     public ChatLoop(ModelClient client, ToolRegistry registry, int maxModelCalls, String systemPrompt) {
+        this(client, registry, maxModelCalls, systemPrompt, AgentHooks.empty());
+    }
+
+    public ChatLoop(ModelClient client, ToolRegistry registry, int maxModelCalls,
+                    String systemPrompt, AgentHooks hooks) {
         if (maxModelCalls <= 0) {
             throw new IllegalArgumentException("每轮模型调用上限必须为正数");
         }
@@ -36,6 +44,7 @@ public final class ChatLoop {
         this.registry = registry;
         this.maxModelCalls = maxModelCalls;
         this.systemPrompt = systemPrompt;
+        this.hooks = Objects.requireNonNull(hooks);
     }
 
     public void run(BufferedReader input, PrintWriter output) throws IOException {
@@ -61,9 +70,17 @@ public final class ChatLoop {
 
             // 首次请求失败仍丢弃本轮；工具执行后保留完整协议历史，操作不能靠丢弃消息撤销。
             List<ChatMessage> request = new ArrayList<>(history);
-            request.add(new ChatMessage("user", line));
+            int turnStart = request.size();
             boolean toolsRecorded = false;
             try {
+                // S04：过滤退出/空输入后，先触发钩子，再记录用户消息。
+                String blocked = hooks.userPromptSubmit(line, history);
+                if (blocked != null) {
+                    output.println("钩子拒绝：" + blocked + " 提示词未记录，未请求模型。");
+                    output.flush();
+                    continue;
+                }
+                request.add(new ChatMessage("user", line));
                 for (int step = 1; step <= maxModelCalls; step++) {
                     ChatMessage answer = client.complete(List.copyOf(request), definitions);
                     request.add(answer);
@@ -72,6 +89,8 @@ public final class ChatLoop {
                     }
                     if (answer.toolCalls().isEmpty()) {
                         history = request;
+                        output.flush();
+                        hooks.stop(request.subList(turnStart, request.size()));
                         break;
                     }
                     boolean limitReached = step == maxModelCalls;

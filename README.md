@@ -1,8 +1,8 @@
 # Java Agent 实战
 
-当前实现 s01 Agent Loop、s02 Tool Use 和 s03 Permission：通过 OpenAI 兼容接口对话，程序执行模型请求的工具并回传结果，再请求模型，直到给出最终回答。支持一次回复中的多个工具调用，按返回顺序执行。输入 `exit`、`quit` 或遇到输入结束时退出。
+当前实现 s01 Agent Loop、s02 Tool Use、s03 Permission 和 s04 Hooks：通过 OpenAI 兼容接口对话，程序执行模型请求的工具并回传结果，再请求模型，直到给出最终回答。支持一次回复中的多个工具调用，按返回顺序执行。输入 `exit`、`quit` 或遇到输入结束时退出。
 
-使用 JDK 17、Maven、Hutool 和 fastjson2。s01 只提供 `shell`；s02 新增文件工具和注册分派；s03 基于 S02 在执行前增加权限规则和逐次用户确认。
+使用 JDK 17、Maven、Hutool 和 fastjson2。s01 只提供 `shell`；s02 新增文件工具和注册分派；s03 基于 S02 在执行前增加权限规则和逐次用户确认；s04 增加提示词记录前、工具调用前后和任务完成后的四类钩子。
 
 ## 构建与启动
 
@@ -27,6 +27,9 @@ openai.api-key=你的密钥
 
 # 第三课
 .\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s03.PermissionMain"
+
+# 第四课
+.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s04.HooksMain"
 ```
 
 也可直接使用已安装的 Maven，例如 `mvn test`、`mvn package`、`mvn -q compile exec:java`。Wrapper 固定 Maven 3.9.3，首次运行需联网下载 Maven 和依赖。`package` 生成普通 JAR，运行时通过 `exec:java` 加载依赖。
@@ -61,7 +64,7 @@ openai.api-key=你的密钥
 
 Windows 使用 `powershell.exe -NoProfile -NonInteractive`，Unix 使用 `/bin/sh`。每次调用启动独立进程，`cd` 和变量不会跨调用保留。标准输出和错误输出合并，超过长度限制后继续排空管道，仅保留前面的字符。超时或中断时尽力终止仍可枚举到的进程树；第一课不支持后台任务管理。PowerShell 输出设置为 UTF-8，外部程序也需要输出 UTF-8 才能正确解码。
 
-`shell` 会真实执行模型提出的命令，具有当前用户的权限。工作目录不是系统沙箱，命令仍可访问其他路径；S01、S02 不询问权限，S03 增加执行前规则和确认。
+`shell` 会真实执行模型提出的命令，具有当前用户的权限。工作目录不是系统沙箱，命令仍可访问其他路径；S01、S02 不询问权限，S03、S04 有执行前规则和确认。
 
 ## 从哪里读代码
 
@@ -122,6 +125,25 @@ S02 在 S01 上增量开发，共用原有 `ChatLoop`、配置、模型客户端
 
 硬拒绝是示例关键词/正则规则，可能误报且不能完整识别 Shell；授权 Shell 后仍以当前用户权限执行，不构成系统沙箱。规则代码位于 `s03/PermissionPolicy.java`，终端确认位于 `PermissionGate.java`。详见[第三课原理与练习](docs/lessons/s03-permission.md)。
 
+## 第四课：Hooks
+
+入口为 `dev.learnagent.s04.HooksMain`。Hook 相关接口、分派器和示例实现全部放在 `s04` 包，沿用已有配置。
+
+| 事件 | 方法 | 时机 |
+| --- | --- | --- |
+| `UserPromptSubmit` | `userPromptSubmit` | 有效用户提示词写入历史、请求模型之前 |
+| `PreToolUse` | `preToolUse` | 工具调用前，早于 S03 权限检查 |
+| `PostToolUse` | `postToolUse` | 工具产生结果后、回传模型之前 |
+| `Stop` | `stop` | 本轮最终回复保存并输出后 |
+
+“任务完成”指模型返回不含工具调用的最终回复；调用超限、失败、超时、中断和退出不触发完成事件。空输入与退出不触发提示词事件，权限确认的 `y/n` 也不属于新提示词。
+
+默认注册 `LoggingHook` 展示四类事件，已移除 `ProtectedPathHook`。前置回调可拒绝本次提交或工具调用；后置回调异常只警告，保留原结果。S03 权限规则继续生效。
+
+自定义 Java 类实现 `s04.AgentHook`，覆盖需要的方法，在 `HooksMain.createLoop(config, client, input, output, callbacks)` 中注册一次即可。`AgentHooks` 由原有 `ChatLoop` 和 `ToolRegistry` 共用；S01—S03 默认使用空事件链。
+
+启动后输入“你好”，观察 `UserPromptSubmit → 最终回复 → Stop`；请求读取文件时，观察中间增加的 `PreToolUse → PostToolUse`。详见[第四课原理、自定义 Hook 与练习](docs/lessons/s04-hooks.md)。本课不包含外部脚本或配置文件加载 Hook。
+
 ## 验证边界
 
 2026-10-20 使用 JDK 17.0.2 和 Maven Wrapper 3.9.3 完成 `package`，55 项自动测试全部通过，普通 JAR 构建成功。自动测试使用模拟模型、本地 HTTP 服务和临时目录中的真实 Shell，验证协议和程序行为。
@@ -131,3 +153,5 @@ S02 在 S01 上增量开发，共用原有 `ChatLoop`、配置、模型客户端
 2026-10-20 S02 完成后再次执行 `package`：共 102 项测试，101 项通过、1 项跳过，无失败或错误。跳过项需要 Windows 符号链接权限；Windows junction 越界检查已实际通过。真实模型完成“写入中文文件 → 精确编辑 → 读回 → glob 查找 → 历史追问 → 退出”。S01 原启动命令也已验证。详见 [S02 验证记录](docs/JAVA_PRACTICE_SPEC.md#s02-验证记录)。
 
 同日 S03 完成后执行 `package`：共 154 项测试，153 项通过、1 项因符号链接权限跳过，无失败或错误。真实模型通过“拒绝写入且文件不存在 → 批准新文件写入 → 无确认读取 → 退出”，S01 / S02 入口均正常。详见 [S03 验证记录](docs/JAVA_PRACTICE_SPEC.md#s03-验证记录)。
+
+同日 S04 调整为四类事件后执行 `package`：共 190 项测试，189 项通过、1 项因符号链接权限跳过，无失败或错误。S04 的 36 项覆盖事件顺序、提示词记录前拦截、完成边界、自定义回调、权限与异常。S01—S04 入口均已验证启动与退出；S04 尚未调用真实模型服务验收。详见 [S04 验证记录](docs/JAVA_PRACTICE_SPEC.md#s04-验证记录)。
