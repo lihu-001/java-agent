@@ -143,10 +143,7 @@ class HooksLoopTest {
         BufferedReader input = new BufferedReader(new StringReader(text));
         StringWriter buffer = new StringWriter();
         PrintWriter output = new PrintWriter(buffer);
-        List<AgentHook> hooks = new ArrayList<>();
-        hooks.add(new LoggingHook(output));
-        hooks.addAll(List.of(custom));
-        HooksMain.createLoop(config(maxCalls), client, input, output, hooks).run(input, output);
+        HooksMain.createLoop(config(maxCalls), client, input, output, root, List.of(custom)).run(input, output);
         return buffer.toString();
     }
 

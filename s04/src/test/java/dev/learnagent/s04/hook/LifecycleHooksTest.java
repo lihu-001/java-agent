@@ -250,7 +250,7 @@ class LifecycleHooksTest {
         PrintWriter output = new PrintWriter(buffer);
         AgentConfig config = new AgentConfig("http://localhost", "unused", "fake", root,
                 maxCalls, Duration.ofSeconds(5), 12000);
-        HooksMain.createLoop(config, client, input, output, List.of(hooks)).run(input, output);
+        HooksMain.createLoop(config, client, input, output, root, List.of(hooks)).run(input, output);
         return buffer.toString();
     }
 

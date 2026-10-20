@@ -9,7 +9,7 @@
 | s01 | dev.learnagent.s01 / AgentLoopMain | 6 个生产类，输入、模型请求、文本消息与历史 |
 | s02 | dev.learnagent.s02 / ToolUseMain | 在对话基础上增加 Shell、文件工具、分派与回传 |
 | s03 | dev.learnagent.s03 / PermissionMain | 在工具分派前增加许可策略和逐次确认 |
-| s04 | dev.learnagent.s04 / HooksMain | 四类生命周期 Hook 与自定义 Java 回调 |
+| s04 | dev.learnagent.s04 / HooksMain | 四类生命周期 Hook、JSON 命令配置与 Java 回调 |
 
 每课是前一课的源码快照加增量修改，拥有独立源码、测试、POM、配置示例、README。各模块不依赖其他课的 JAR 或源码，不使用共用 Java 核心。根 POM 为 packaging=pom，只聚合四课、管理依赖和插件版本。
 
@@ -24,6 +24,10 @@ S02 增加 AgentTool、ToolDefinition、ToolCall、ToolRegistry、Shell 和四�
 S03 新增 ToolPermission、PermissionPolicy、PermissionGate、PermissionMain。读和查找默认允许，写/编辑/Shell 逐次确认，越界和示例硬拒绝直接阻止。确认不进入模型历史，批准只针对本次。没有 Hook 类。
 
 S04 新增 hook.AgentHook、hook.AgentHooks、hook.LoggingHook 和根包 HooksMain。四事件为 UserPromptSubmit、PreToolUse、PostToolUse、Stop。两个前置事件可拦截，后置异常不覆盖结果；任务完成仅指本轮正常最终回复，失败、超时、超限、中断和退出不触发 Stop。事件链由本模块循环和工具分派器共用，自定义回调只注册一次。
+
+S04 固定从本子项目的 `.agents/hook.json` 加载用户配置，与启动目录无关，不读取或回退到父工程的 Hook 配置。S04ProjectDirectory 根据本模块编译产物定位源码工程；显式项目目录重载仅供嵌入和隔离测试。配置缺失或空 hooks 时仍执行 Agent 的 Java Hook，配置错误阻止启动。HookConfig 校验四事件、工具名称 matcher 正则、command 类型和 1—300 秒 timeout（默认 30）；CommandHook 生成事件 JSON，HookCommandRunner 通过 stdin 交给命令。命令在 S04 子项目目录同步执行，输出最多保留 12000 字符；前置退出码 0 放行、2 拦截，其他失败也拦截；后置失败告警并保留结果。Windows 使用 PowerShell，Unix 使用 /bin/sh，超时或中断尽力终止进程树。所有 HooksMain.createLoop 重载均按“内置日志 → 追加的 Agent Java 回调 → 用户 JSON 命令”合并注册，两种来源共同生效；传入 Java 列表不会关闭日志或 JSON。详见 [Hook 配置协议](lessons/s04-hooks.md#3-json-配置命令-hook)。
+
+用户命令注册前必须通过 HookTrust 独立信任确认。y/yes 记忆授权，once 只授权本次会话，其他输入或 EOF 不启用用户命令但保留 Java 回调。HookTrustStore 按规范化项目路径在用户目录 `.java-agent/hook-trust/` 存储内容摘要，项目 JSON 不能自行声明信任；记录损坏、缺失或不可读时重新确认，保存失败仅本次有效。HookTrustSnapshot 跟踪配置、命令中可识别的字面量脚本以及 trust_files 声明的普通文件，确认期间及每次执行前校验内容。运行中变化则该会话的用户 Hook 失效，前置阻止、后置告警，重启后重新授权。确认答案不进入模型历史，信任 Hook 不代替 S03 工具审批。这是启用授权和变更检测，不是代码安全分析或系统沙箱。
 
 保留前一课的组装类便于代码对照；启动应使用各模块 POM 的默认入口。例如 s04 默认 HooksMain，直接手动运行保留的 app.ToolUseMain 不会启用权限和 Hook。
 
@@ -93,3 +97,19 @@ S05 TodoWrite、S06 Subagent、S07 Skill Loading、S08 Context Compact、S09 Mem
 2026-10-20，将 S04 的 25 个生产类和 14 个测试类迁移到职责子包，根包只保留 HooksMain。更新跨包导入；仅将 WorkspaceFiles.root() 公开给 app 组装层，文件读写与参数解析辅助方法仍为包内可见。默认入口和启动命令不变，S01—S03 源码未修改。
 
 清理 S04 旧编译产物后完成测试，再运行根目录 `.\mvnw.cmd package`，四模块全部成功；仍为 470 项、467 通过、3 项符号链接权限跳过。S04 为 190 项、189 通过、1 跳过。根目录 `-pl s04 -q exec:java` 输入 exit 正常启动并退出，显示四事件及五工具；没有请求真实模型服务。测试与文档引用已同步迁移到新包。
+
+## S04 JSON 命令 Hook 验证
+
+2026-10-20，增加 HookConfig、CommandHook、HookCommandRunner，以及 S04 子项目下的配置与完整示例。默认固定加载 `s04/.agents/hook.json`，命令以 S04 为工作目录；示例脚本使用 Python，核心运行与 JUnit 测试不依赖 Python。
+
+根目录 `.\mvnw.cmd -B package` 成功：共 522 项测试，519 通过、3 项 Windows 符号链接权限跳过，无失败或错误。其中 S04 共 242 项，241 通过、1 跳过；新增的 52 项均通过，覆盖配置校验、四事件 JSON 传递、匹配顺序、拒绝和权限衔接、后置隔离、超时中断、输出限制及子项目定位。包含 4 项组合回归：Java 与 JSON 在四事件同时执行且日志不重复、Java 拒绝阻止用户命令、Java 放行后用户仍可拒绝、Java 后置失败不阻止用户回调；6 项定位测试覆盖 Maven/IDEA 路径、中文空格路径及禁止回退到父工程配置。
+
+根目录启动时日志确认读取 `s04/.agents/hook.json`，输入 exit 正常退出。另从无关临时目录启动，放置假模型配置及故意无效的本地 Hook 配置，确认程序忽略启动目录 Hook 配置，仍加载 S04 的用户配置、执行 Python 脚本并拦截“取消”，没有请求模型。临时目录已清理；IDEA 产物路径通过单元测试模拟，未操控 IDE。没有请求真实模型服务；Unix Shell 分支未在本机执行。
+
+## S04 用户 Hook 信任验证
+
+2026-10-20，加入 HookTrust、HookTrustStore、HookTrustSnapshot；保留内置 Java Hook，用户命令单独授权。全量 `.\mvnw.cmd -B package` 通过：545 项测试、542 通过、3 项 Windows 符号链接权限跳过，无失败或错误；S04 共 265 项、264 通过、1 跳过。
+
+新增 19 项信任流程测试及 4 项配置校验测试，覆盖拒绝/EOF、单次授权、记忆授权与项目隔离、配置变更、脚本内容变化但大小/时间戳不变、显式依赖、缺失文件、坏记录、存储读写故障、确认过程中变化、运行中失效，以及 Java 回调与 S03 工具审批独立。所有信任记录使用临时目录，不读写真实用户记录。
+
+实际 HooksMain 入口在独立 JVM、临时 user.home 和假模型配置下完成五种离线验证：拒绝、仅本次、信任并保存、下一次免确认、删除记录后重新确认。使用 S04 当前示例脚本拦截“取消”，没有请求模型；临时用户目录已清理。用户当前 hook.json 未修改。

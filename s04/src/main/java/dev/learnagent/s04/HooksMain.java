@@ -3,8 +3,12 @@ package dev.learnagent.s04;
 import dev.learnagent.s04.app.PermissionMain;
 import dev.learnagent.s04.app.ToolUseMain;
 import dev.learnagent.s04.config.AgentConfig;
+import dev.learnagent.s04.config.S04ProjectDirectory;
 import dev.learnagent.s04.hook.AgentHook;
 import dev.learnagent.s04.hook.AgentHooks;
+import dev.learnagent.s04.hook.HookConfig;
+import dev.learnagent.s04.hook.HookTrust;
+import dev.learnagent.s04.hook.HookTrustStore;
 import dev.learnagent.s04.hook.LoggingHook;
 import dev.learnagent.s04.loop.ChatLoop;
 import dev.learnagent.s04.model.ModelClient;
@@ -22,6 +26,7 @@ import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 
 public final class HooksMain {
@@ -33,12 +38,36 @@ public final class HooksMain {
 
     public static ChatLoop createLoop(AgentConfig config, ModelClient client, BufferedReader input, PrintWriter output)
             throws IOException {
-        return createLoop(config, client, input, output, List.of(new LoggingHook(output)));
+        return createLoop(config, client, input, output, S04ProjectDirectory.resolve());
     }
 
-    /** 自定义 Hook 只注册一次，四类事件共享同一条链。 */
+    /** 默认使用 S04 子项目；显式目录仅供嵌入和隔离测试。 */
     public static ChatLoop createLoop(AgentConfig config, ModelClient client, BufferedReader input,
-                                     PrintWriter output, List<? extends AgentHook> callbacks) throws IOException {
+                                     PrintWriter output, Path projectDirectory) throws IOException {
+        return createLoop(config, client, input, output, projectDirectory, List.of());
+    }
+
+    /** 追加 Agent 的 Java Hook；保留默认日志，用户 JSON Hook 另经信任授权启用。 */
+    public static ChatLoop createLoop(AgentConfig config, ModelClient client, BufferedReader input,
+                                     PrintWriter output, List<? extends AgentHook> agentCallbacks) throws IOException {
+        return createLoop(config, client, input, output, S04ProjectDirectory.resolve(), agentCallbacks);
+    }
+
+    /** 注册顺序：内置日志 → 追加的 Agent Java Hook → 用户 JSON Hook。 */
+    public static ChatLoop createLoop(AgentConfig config, ModelClient client, BufferedReader input,
+                                     PrintWriter output, Path projectDirectory,
+                                     List<? extends AgentHook> agentCallbacks) throws IOException {
+        return createLoop(config, client, input, output, projectDirectory, agentCallbacks, HookTrustStore.userStore());
+    }
+
+    /** 显式信任存储用于测试，避免测试读写真实用户授权。 */
+    public static ChatLoop createLoop(AgentConfig config, ModelClient client, BufferedReader input,
+                                     PrintWriter output, Path projectDirectory,
+                                     List<? extends AgentHook> agentCallbacks, HookTrustStore trustStore) throws IOException {
+        List<AgentHook> callbacks = new ArrayList<>();
+        callbacks.add(new LoggingHook(output));
+        callbacks.addAll(agentCallbacks);
+        callbacks.addAll(HookTrust.load(projectDirectory, input, output, trustStore));
         WorkspaceFiles files = new WorkspaceFiles(config.workDirectory());
         PermissionGate gate = new PermissionGate(new PermissionPolicy(files), input, output);
         AgentHooks hooks = new AgentHooks(callbacks, message -> {
@@ -59,14 +88,18 @@ public final class HooksMain {
             AgentConfig config = AgentConfig.load(Path.of("config.properties"));
             ModelClient client = new OpenAiClient(config.baseUrl(), config.apiKey(),
                     config.model(), Duration.ofSeconds(60));
-            ChatLoop loop = createLoop(config, client, input, output);
+            Path projectDirectory = S04ProjectDirectory.resolve();
+            ChatLoop loop = createLoop(config, client, input, output, projectDirectory);
             output.println("S04 Hooks：UserPromptSubmit / PreToolUse / PostToolUse / Stop。");
             output.println("用户提示词记录前、工具调用前后、本轮任务完成后触发；保留 S03 权限检查。");
+            output.println("Hook 配置> " + projectDirectory.resolve(HookConfig.DEFAULT_PATH)
+                    + "（启动时加载，用户命令需独立信任授权）");
             loop.run(input, output);
         } catch (IllegalArgumentException e) {
             output.println("配置错误：" + e.getMessage());
         } catch (IOException e) {
-            output.println("工作目录初始化或终端读取失败（" + e.getClass().getSimpleName() + "），对话结束。");
+            output.println("Hook 配置读取、工作目录初始化或终端读取失败（"
+                    + e.getClass().getSimpleName() + "），对话结束。");
         } finally {
             output.flush();
         }

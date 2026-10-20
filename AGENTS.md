@@ -15,6 +15,10 @@
 
 S04 根包只保留默认入口 `HooksMain`；按职责拆为 `app`、`config`、`loop`、`model`、`tool`、`tool.file`、`permission`、`hook`。测试使用对应子包，不将新类重新堆回根包。Hook 接口与实现位于 `s04.hook`：`AgentHook`、`AgentHooks`、`LoggingHook`。事件为提示词记录前、工具调用前后、任务完成后。前置放行仍需权限检查；后置异常不覆盖结果；超限、失败、中断和退出不触发 Stop。
 
+S04 命令 Hook 固定加载本子项目的 `s04/.agents/hook.json`，不受进程工作目录影响，不读取或回退到父工程 Hook 配置；`config.S04ProjectDirectory` 从本模块编译产物定位子项目。`HookConfig`、`CommandHook`、`HookCommandRunner` 均放在 `s04.hook`。配置错误阻止启动；命令在 S04 子项目目录运行，通过 UTF-8 stdin 接收 JSON，不将提示词或工具参数拼接到命令中。前置非零退出或执行失败拒绝，后置失败只告警；命令有独立超时和输出上限。Java Hook 属于 Agent 内置行为，JSON Hook 属于用户扩展；所有 HooksMain.createLoop 重载均保留两者，顺序为内置日志、追加的 Java Hook、用户 JSON Hook。Java 列表只追加，不替换默认注册。
+
+用户 JSON Hook 必须经过独立的 HookTrust 启用确认，不能复用或绕过 S03 工具审批。首次或内容变化时支持 y/yes 记忆授权、once 单次会话、其余及 EOF 不启用；拒绝仍保留 Java Hook。HookTrustStore 默认写入用户目录 `.java-agent/hook-trust/`，项目 JSON 不得自授信任。HookTrustSnapshot 校验配置、字面量脚本和 trust_files 的内容，执行前检测变化；失效后前置拦截、后置告警，重启再确认。测试必须使用临时信任存储，不写真实用户记录。内容摘要不是脚本安全证明或系统沙箱。
+
 ## 构建与测试
 
 JDK 17、Maven；工具类优先 Hutool，JSON 使用 fastjson2。JUnit 5 版本固定在父 POM。
