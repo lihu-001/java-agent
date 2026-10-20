@@ -1,51 +1,129 @@
 # 用 Java 创建 Agent：先跑通对话循环
 
-创建 Agent 的第一步，先让程序能够持续接收输入、请求模型，并带着历史继续对话。本阶段采用 Java 17 和 OpenAI 兼容接口，只实现文本对话，工具调用后续再加。
+# S01、最小Agent循环
+
+## 1、最小对话循环
+
+创建 Agent 的第一步，先让程序能够持续接收输入、请求模型，并带着历史继续对话。
+
+本阶段采用 Java 17 和 OpenAI 兼容接口，只实现文本对话，工具调用后续再加。
 
 核心流程很简单：
 
-```text
-读取输入 → 携带历史请求模型 → 输出回答 → 更新历史 → 等待下一次输入
-```
+![](assets/mermaid-diagram.png)
 
-**多轮对话的关键是主动传递历史。** 当前实现每次调用 Chat Completions，都会把此前成功的问答放进 `messages`。例如，先说“我叫小李”，再问“我叫什么？”，第二次请求需要包含：
+**多轮对话的关键是主动传递历史。** 接口返回信息、历史对话信息也作为下次请求的参数。
 
-```text
-system：你是一个友好的助手，请用中文回答。
-user：我叫小李
-assistant：你好，小李
-user：我叫什么？
-```
-
-程序用 `List<ChatMessage>` 保存这些消息，`ChatMessage` 只包含角色和内容：
+`核心循环逻辑代码如下：`
 
 ```java
-public record ChatMessage(String role, String content) {}
+
+        List<ChatMessage> history = new ArrayList<>();
+        history.add(new ChatMessage("system", "你是一个友好的助手，请用中文回答。"));
+        output.println("对话已启动，输入 exit 或 quit 退出。每行输入发送一次请求。");
+        while (true) {
+            //获取用户输入
+            String line = input.readLine();
+
+            // 使用历史副本发起请求，成功后再用完整问答更新历史。
+            List<ChatMessage> request = new ArrayList<>(history);
+            request.add(new ChatMessage("user", line));
+            //调用API接口
+            String answer = client.complete(List.copyOf(request));
+            //将返回信息添加到历史对话中
+            request.add(new ChatMessage("assistant", answer));
+            history = request;
+        }
+
 ```
 
-**历史只在请求成功后更新。** 如果先把用户输入写入历史，再调用模型，请求失败后就会留下没有回答的问题。这里选择先创建本轮请求副本，成功后再将完整问答作为新历史。
+这一阶段需要掌握的是：**每轮请求使用历史副本，成功后保存完整问答，失败时保留原历史。**
 
-`ChatLoop.run` 中负责这一过程的核心语句是：
+## 2、调用工具
+
+对话没问题了，然后发现文件中的信息要手动复制粘贴到对话中才行，那么能否让大模型直接读取文件呢？ 能，就是工具调用。
+
+核心流程如下：
+
+![](assets/agent_tool.png)
+
+细节说明：
+
+1、调用工具是在调用大模型接口后，因为是大模型来决定要不要调用工具。
+
+2、一次会话可能进行多次工具调用，也可能进行多次API调用。
+
+因为在工具调用结果中，可能需要再次调用API接口
+
+然后又因为不可预测性太多了，可能在死循环调用，可能卡死，可能空循环等等，所以需要添加一个最大调用次数限制，超过限制就停止调用。
+
+核心代码逻辑如下：
 
 ```java
-List<ChatMessage> request = new ArrayList<>(history);
-request.add(new ChatMessage("user", line));
+public void run(BufferedReader input, PrintWriter output) throws IOException {
+        List<ChatMessage> history = new ArrayList<>();
+        history.add(new ChatMessage("system", "你是一个编程助手，请用中文回答。需要操作或查看环境时使用 shell 工具，"
+                + "根据真实工具结果回答。工具错误可修正后再次调用，不要把失败描述为成功。"));
+        List<ToolDefinition> definitions = List.of(tool.definition());
+        output.println("对话已启动，输入 exit 或 quit 退出。每次输入可触发多次工具调用。");
+        output.println("工具> " + tool.definition().description());
+        while (true) {
+            output.print("你> ");
+            output.flush();
+            String line = input.readLine();
+            if (line == null || "exit".equalsIgnoreCase(line.strip()) || "quit".equalsIgnoreCase(line.strip())) {
+                output.println("对话已结束。");
+                output.flush();
+                return;
+            }
+            if (StrUtil.isBlank(line)) {
+                continue;
+            }
 
-String answer = client.complete(List.copyOf(request));
-
-request.add(new ChatMessage("assistant", answer));
-history = request;
-output.println("助手> " + answer);
+            // 首次请求失败仍丢弃本轮；工具执行后保留完整协议历史，操作不能靠丢弃消息撤销。
+            List<ChatMessage> request = new ArrayList<>(history);
+            request.add(new ChatMessage("user", line));
+            boolean toolsRecorded = false;
+            try {
+                for (int step = 1; step <= maxModelCalls; step++) {
+                    ChatMessage answer = client.complete(List.copyOf(request), definitions);
+                    request.add(answer);
+                    if (StrUtil.isNotBlank(answer.content())) {
+                        output.println("助手> " + answer.content());
+                    }
+                    if (answer.toolCalls().isEmpty()) {
+                        history = request;
+                        break;
+                    }
+                    boolean limitReached = step == maxModelCalls;
+                    for (ToolCall call : answer.toolCalls()) {
+                        output.println("工具请求> " + call.name() + " [" + call.id() + "] " + call.arguments());
+                        output.flush();
+                        String result = limitReached ? "工具未执行：已达到本轮模型调用上限。"
+                                : executeTool(call);
+                        request.add(ChatMessage.tool(call.id(), result));
+                        output.println("工具结果> [" + call.id() + "] " + result);
+                        output.flush();
+                    }
+                    history = request;
+                    toolsRecorded = true;
+                    if (limitReached) {
+                        String reason = "已达到本轮模型调用上限（" + maxModelCalls + " 次），停止本轮；最后一批工具未执行。";
+                        request.add(new ChatMessage("assistant", reason));
+                        output.println("助手> " + reason);
+                    }
+                }
+            } catch (HttpTimeoutException e) {
+                output.println("请求超时；" + failureHint(toolsRecorded));
+            } catch (IOException e) {
+                output.println("请求失败：" + e.getMessage() + "；" + failureHint(toolsRecorded));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                output.println("请求已中断，对话结束。");
+                output.flush();
+                return;
+            }
+            output.flush();
+        }
+    }
 ```
-
-`new ArrayList<>(history)` 创建独立列表，向 `request` 添加消息不会修改原来的 `history`。这里是浅拷贝，但消息由不可变的 record 和 String 组成，足以满足当前需求。
-
-`List.copyOf(request)` 将不可修改的列表交给模型客户端，避免客户端改动本轮消息。请求成功后，追加助手回答，再执行 `history = request`。这样，用户消息只需要添加一次。
-
-如果模型调用抛出异常，就不会执行后面的追加和赋值。外围异常处理会提示失败，下一次输入仍从原来的历史开始。请求超时为 60 秒，不自动重试；线程中断则结束对话。
-
-循环本身只负责输入、历史和输出。`OpenAiClient` 使用 JDK HttpClient 发送请求，用 fastjson2 序列化消息并读取回答。API 地址、模型和密钥从项目根目录的 `config.properties` 读取。
-
-运行时，空输入直接跳过，输入 `exit`、`quit` 或遇到输入结束时退出。历史保存在内存中，重启后清空。当前已有测试验证多轮消息顺序、失败后恢复、退出和 HTTP 超时。
-
-这一阶段需要掌握的是：**每轮请求使用历史副本，成功后保存完整问答，失败时保留原历史。** 后续加入工具调用时，再扩展模型回复之后的处理流程。

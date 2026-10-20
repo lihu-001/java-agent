@@ -24,7 +24,8 @@ public final class AgentLoopMain {
             AgentConfig config = AgentConfig.load(Path.of("config.properties"));
             ModelClient client = new OpenAiClient(config.baseUrl(), config.apiKey(),
                     config.model(), Duration.ofSeconds(60));
-            new ChatLoop(client).run(input, output);
+            AgentTool shell = new ShellTool(config.workDirectory(), config.shellTimeout(), config.maxOutputChars());
+            new ChatLoop(client, shell, config.maxModelCalls()).run(input, output);
         } catch (IllegalArgumentException e) {
             output.println("配置错误：" + e.getMessage());
         } catch (IOException e) {

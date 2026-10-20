@@ -8,9 +8,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Properties;
 
-public record AgentConfig(String baseUrl, String apiKey, String model) {
+public record AgentConfig(String baseUrl, String apiKey, String model, Path workDirectory,
+                          int maxModelCalls, Duration shellTimeout, int maxOutputChars) {
     public static AgentConfig load(Path path) {
         Properties properties = new Properties();
         try (BufferedReader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
@@ -31,7 +33,23 @@ public record AgentConfig(String baseUrl, String apiKey, String model) {
         return new AgentConfig(
                 required(properties, "openai.base-url", "https://api.openai.com/v1"),
                 required(properties, "openai.api-key", null),
-                required(properties, "openai.model", null));
+                required(properties, "openai.model", null),
+                Path.of(required(properties, "agent.work-dir", "playground")),
+                positiveInt(properties, "agent.max-model-calls", 10),
+                Duration.ofSeconds(positiveInt(properties, "shell.timeout-seconds", 30)),
+                positiveInt(properties, "shell.max-output-chars", 12000));
+    }
+
+    private static int positiveInt(Properties properties, String key, int defaultValue) {
+        try {
+            int value = Integer.parseInt(properties.getProperty(key, String.valueOf(defaultValue)).strip());
+            if (value > 0) {
+                return value;
+            }
+        } catch (NumberFormatException ignored) {
+            // 只展示配置名称，避免错误信息回显配置内容。
+        }
+        throw new IllegalArgumentException(key + " 必须为正整数");
     }
 
     private static String required(Properties properties, String key, String defaultValue) {

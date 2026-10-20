@@ -12,7 +12,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public final class OpenAiClient implements ModelClient {
     private final HttpClient httpClient;
@@ -47,11 +50,25 @@ public final class OpenAiClient implements ModelClient {
     }
 
     @Override
-    public String complete(List<ChatMessage> messages) throws IOException, InterruptedException {
+    public ChatMessage complete(List<ChatMessage> messages, List<ToolDefinition> tools)
+            throws IOException, InterruptedException {
         JSONObject body = new JSONObject();
         body.put("model", model);
-        body.put("messages", messages);
+        body.put("messages", messages.stream().map(this::serializeMessage).toList());
         body.put("stream", false);
+        if (!tools.isEmpty()) {
+            body.put("tools", tools.stream().map(tool -> {
+                JSONObject function = new JSONObject();
+                function.put("name", tool.name());
+                function.put("description", tool.description());
+                function.put("parameters", tool.parameters());
+                JSONObject definition = new JSONObject();
+                definition.put("type", "function");
+                definition.put("function", function);
+                return definition;
+            }).toList());
+            body.put("tool_choice", "auto");
+        }
         HttpRequest request = HttpRequest.newBuilder(endpoint)
                 .timeout(timeout)
                 .header("Authorization", "Bearer " + apiKey)
@@ -67,25 +84,76 @@ public final class OpenAiClient implements ModelClient {
         return parseAnswer(response.body());
     }
 
-    private String parseAnswer(String body) throws IOException {
+    private JSONObject serializeMessage(ChatMessage message) {
+        JSONObject json = new JSONObject();
+        json.put("role", message.role());
+        if (message.content() != null) {
+            json.put("content", message.content());
+        }
+        if (message.toolCallId() != null) {
+            json.put("tool_call_id", message.toolCallId());
+        }
+        if (!message.toolCalls().isEmpty()) {
+            json.put("tool_calls", message.toolCalls().stream().map(call -> {
+                JSONObject function = new JSONObject();
+                function.put("name", call.name());
+                function.put("arguments", call.arguments());
+                JSONObject toolCall = new JSONObject();
+                toolCall.put("id", call.id());
+                toolCall.put("type", "function");
+                toolCall.put("function", function);
+                return toolCall;
+            }).toList());
+        }
+        return json;
+    }
+
+    private ChatMessage parseAnswer(String body) throws IOException {
         try {
             JSONObject response = JSON.parseObject(body);
             JSONArray choices = response == null ? null : response.getJSONArray("choices");
             if (choices == null || choices.isEmpty()) {
                 throw new IOException("模型响应缺少 choices");
             }
-            JSONObject message = choices.getJSONObject(0).getJSONObject("message");
+            JSONObject choice = choices.getJSONObject(0);
+            String finishReason = choice.getString("finish_reason");
+            if ("length".equals(finishReason) || "content_filter".equals(finishReason)) {
+                throw new IOException("模型响应未完成：" + finishReason);
+            }
+            JSONObject message = choice.getJSONObject("message");
             if (message == null || !"assistant".equals(message.getString("role"))) {
                 throw new IOException("模型响应缺少 assistant 消息");
             }
             JSONArray calls = message.getJSONArray("tool_calls");
-            if ((calls != null && !calls.isEmpty()) || message.get("function_call") != null) {
-                throw new IOException("当前版本只支持文本回答");
+            if (message.get("function_call") != null) {
+                throw new IOException("不支持旧版 function_call，请使用 tool_calls");
             }
-            if (!(message.get("content") instanceof String answer) || StrUtil.isBlank(answer)) {
+            Object content = message.get("content");
+            if (content != null && !(content instanceof String)) {
+                throw new IOException("模型响应的 content 必须是文本或 null");
+            }
+            List<ToolCall> toolCalls = new ArrayList<>();
+            Set<String> ids = new HashSet<>();
+            if (calls != null) {
+                for (int i = 0; i < calls.size(); i++) {
+                    JSONObject call = calls.getJSONObject(i);
+                    JSONObject function = call.getJSONObject("function");
+                    String id = call.getString("id");
+                    if (!"function".equals(call.getString("type")) || StrUtil.isBlank(id)
+                            || !ids.add(id) || function == null
+                            || StrUtil.isBlank(function.getString("name"))
+                            || !(function.get("arguments") instanceof String)) {
+                        throw new IOException("模型响应包含无效或重复的工具调用");
+                    }
+                    // arguments 的 JSON 校验由工具执行器负责，错误可回传模型修正。
+                    toolCalls.add(new ToolCall(id, function.getString("name"), function.getString("arguments")));
+                }
+            }
+            String answer = (String) content;
+            if (toolCalls.isEmpty() && (StrUtil.isBlank(answer) || "tool_calls".equals(finishReason))) {
                 throw new IOException("模型响应缺少文本 content");
             }
-            return answer;
+            return ChatMessage.assistant(answer, toolCalls);
         } catch (RuntimeException e) {
             throw new IOException("模型响应不是有效的 Chat Completions JSON");
         }

@@ -1,0 +1,3 @@
+这是第一课的练习文件。
+让模型通过 shell 列出目录并读取本文件，再根据实际工具结果说明文件用途。
+Windows 工具使用 PowerShell，例如 Get-ChildItem 和 Get-Content -Encoding UTF8。

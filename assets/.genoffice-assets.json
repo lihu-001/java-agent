@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "name": "agent_tool.png",
+      "sha256": "2e62b1c4c72b215b34b9263cb0575b7d1077093b34c1e6ca76c412bd91b5a2a5"
+    },
+    {
+      "name": "mermaid-diagram.png",
+      "sha256": "b96693de77ab954fe7fa7b792f1ae6c1fc83e25ad3c5aa0c19d1d649fd202a5a"
+    }
+  ],
+  "documents": {
+    "AI创建Agent.md": [
+      "agent_tool.png",
+      "mermaid-diagram.png"
+    ]
+  },
+  "pending": {}
+}

@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-当前实现 `dev.learnagent.s01` 的纯文本对话循环，入口为 `AgentLoopMain`。`src/main/java` 放应用代码，`src/test/java` 放测试，按需使用 `src/main/resources` 放配置和资源。按课次划分包，测试包路径与被测代码一致。新增模块时，在根目录 README 说明模块职责和入口。扩展课程前阅读 `docs/JAVA_PRACTICE_SPEC.md` 的当前范围。
+当前实现 `dev.learnagent.s01` 的对话与 Shell 工具调用循环，入口为 `AgentLoopMain`。`src/main/java` 放应用代码，`src/test/java` 放测试，按需使用 `src/main/resources` 放配置和资源。按课次划分包，测试包路径与被测代码一致。新增模块时，在根目录 README 说明模块职责和入口。扩展课程前阅读 `docs/JAVA_PRACTICE_SPEC.md` 的当前范围。
 
 ## 构建、测试与本地开发
 

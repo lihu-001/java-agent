@@ -31,6 +31,29 @@ class AgentConfigTest {
     void usesDefaultBaseUrlWhenOmitted() throws IOException {
         AgentConfig config = AgentConfig.load(write("openai.model=test-model\nopenai.api-key=test-secret\n"));
         assertEquals("https://api.openai.com/v1", config.baseUrl());
+        assertEquals(Path.of("playground"), config.workDirectory());
+        assertEquals(10, config.maxModelCalls());
+        assertEquals(30, config.shellTimeout().toSeconds());
+        assertEquals(12000, config.maxOutputChars());
+    }
+
+    @Test
+    void readsToolLimits() throws IOException {
+        AgentConfig config = AgentConfig.load(write("openai.model=test\nopenai.api-key=test\n"
+                + "agent.work-dir=练习\nagent.max-model-calls=3\nshell.timeout-seconds=2\nshell.max-output-chars=100\n"));
+        assertEquals(Path.of("练习"), config.workDirectory());
+        assertEquals(3, config.maxModelCalls());
+        assertEquals(2, config.shellTimeout().toSeconds());
+        assertEquals(100, config.maxOutputChars());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"agent.max-model-calls=0", "agent.max-model-calls=-1",
+            "shell.timeout-seconds=abc", "shell.max-output-chars=2147483648", "shell.max-output-chars="})
+    void rejectsInvalidLimits(String setting) throws IOException {
+        Path file = write("openai.model=test\nopenai.api-key=test\n" + setting + "\n");
+        assertTrue(assertThrows(IllegalArgumentException.class, () -> AgentConfig.load(file))
+                .getMessage().contains(setting.split("=")[0]));
     }
 
     @ParameterizedTest

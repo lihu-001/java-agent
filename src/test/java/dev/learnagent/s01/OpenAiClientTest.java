@@ -62,10 +62,10 @@ class OpenAiClientTest {
 
     @Test
     void sendsChatCompletionWithUtf8HistoryAndNoTools() throws Exception {
-        String answer = client(baseUrl + "/", Duration.ofSeconds(5)).complete(List.of(
-                new ChatMessage("system", "请用中文回答"), new ChatMessage("user", "你好")));
+        ChatMessage answer = client(baseUrl + "/", Duration.ofSeconds(5)).complete(List.of(
+                new ChatMessage("system", "请用中文回答"), new ChatMessage("user", "你好")), List.of());
 
-        assertEquals("你好，小李", answer);
+        assertEquals("你好，小李", answer.content());
         assertEquals("POST", method.get());
         assertEquals("Bearer test-key", authorization.get());
         assertEquals("test-model", request.get().getString("model"));
@@ -75,10 +75,76 @@ class OpenAiClientTest {
     }
 
     @Test
+    void parsesMultipleToolCallsWithNullContentAndSerializesProtocolFields() throws Exception {
+        response = """
+                {"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                "tool_calls":[
+                  {"id":"a","type":"function","function":{"name":"shell","arguments":"{\\"command\\":\\"pwd\\"}"}},
+                  {"id":"b","type":"function","function":{"name":"shell","arguments":"broken json"}}]}}]}
+                """;
+        ToolDefinition definition = new ShellTool(java.nio.file.Path.of("playground"), Duration.ofSeconds(30), 12000)
+                .definition();
+        OpenAiClient client = client(baseUrl, Duration.ofSeconds(5));
+        ChatMessage answer = client.complete(List.of(new ChatMessage("user", "目录")), List.of(definition));
+        assertNull(answer.content());
+        assertEquals(2, answer.toolCalls().size());
+        assertEquals(new ToolCall("a", "shell", "{\"command\":\"pwd\"}"), answer.toolCalls().get(0));
+        assertEquals("broken json", answer.toolCalls().get(1).arguments());
+        JSONObject tool = request.get().getJSONArray("tools").getJSONObject(0);
+        assertEquals("function", tool.getString("type"));
+        assertEquals("shell", tool.getJSONObject("function").getString("name"));
+        assertEquals("command", tool.getJSONObject("function").getJSONObject("parameters")
+                .getJSONArray("required").getString(0));
+        assertEquals("auto", request.get().getString("tool_choice"));
+
+        response = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"完成\"}}]}";
+        client.complete(List.of(new ChatMessage("user", "目录"), answer,
+                ChatMessage.tool("a", "中文结果"), ChatMessage.tool("b", "参数错误")), List.of(definition));
+        JSONObject sentAssistant = request.get().getJSONArray("messages").getJSONObject(1);
+        assertFalse(sentAssistant.containsKey("toolCalls"));
+        assertFalse(sentAssistant.containsKey("toolCallId"));
+        JSONObject sentCall = sentAssistant.getJSONArray("tool_calls").getJSONObject(0);
+        assertEquals("a", sentCall.getString("id"));
+        assertEquals("function", sentCall.getString("type"));
+        assertInstanceOf(String.class, sentCall.getJSONObject("function").get("arguments"));
+        JSONObject sentResult = request.get().getJSONArray("messages").getJSONObject(2);
+        assertEquals("tool", sentResult.getString("role"));
+        assertEquals("a", sentResult.getString("tool_call_id"));
+        assertEquals("中文结果", sentResult.getString("content"));
+        assertFalse(sentResult.containsKey("tool_calls"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":{}}}",
+            "{\"id\":\"\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}",
+            "{\"id\":\"a\",\"type\":\"other\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}",
+            "{\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"\",\"arguments\":\"{}\"}}"})
+    void rejectsMalformedToolCall(String call) {
+        response = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"tool_calls\":[" + call + "]}}]}";
+        assertThrows(IOException.class, () -> client(baseUrl, Duration.ofSeconds(5)).complete(List.of(), List.of()));
+    }
+
+    @Test
+    void rejectsDuplicateCallIds() {
+        String call = "{\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}";
+        response = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"tool_calls\":[" + call + "," + call + "]}}]}";
+        assertThrows(IOException.class, () -> client(baseUrl, Duration.ofSeconds(5)).complete(List.of(), List.of()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"length", "content_filter", "tool_calls"})
+    void rejectsIncompleteResponsesBeforeCommandsCanRun(String reason) {
+        response = "{\"choices\":[{\"finish_reason\":\"" + reason
+                + "\",\"message\":{\"role\":\"assistant\",\"content\":\"incomplete\"}}]}";
+        assertThrows(IOException.class, () -> client(baseUrl, Duration.ofSeconds(5)).complete(List.of(), List.of()));
+    }
+
+    @Test
     void httpErrorIncludesStatusButDoesNotEchoProviderBody() {
         status = 401;
         response = "private provider details test-key";
-        IOException error = assertThrows(IOException.class, () -> client(baseUrl, Duration.ofSeconds(5)).complete(List.of()));
+        IOException error = assertThrows(IOException.class, () -> client(baseUrl, Duration.ofSeconds(5)).complete(List.of(), List.of()));
         assertTrue(error.getMessage().contains("401"));
         assertFalse(error.getMessage().contains("test-key"));
         assertFalse(error.getMessage().contains("private"));
@@ -91,14 +157,14 @@ class OpenAiClientTest {
             "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"tool_calls\":[{}]}}]}"})
     void rejectsMissingOrMalformedTextResponses(String body) {
         response = body;
-        assertThrows(IOException.class, () -> client(baseUrl, Duration.ofSeconds(5)).complete(List.of()));
+        assertThrows(IOException.class, () -> client(baseUrl, Duration.ofSeconds(5)).complete(List.of(), List.of()));
     }
 
     @Test
     void requestHasTimeout() {
         delayMillis = 500;
         assertThrows(HttpTimeoutException.class,
-                () -> client(baseUrl, Duration.ofMillis(100)).complete(List.of()));
+                () -> client(baseUrl, Duration.ofMillis(100)).complete(List.of(), List.of()));
     }
 
     private OpenAiClient client(String url, Duration timeout) {

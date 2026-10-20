@@ -5,5 +5,6 @@ import java.util.List;
 
 @FunctionalInterface
 public interface ModelClient {
-    String complete(List<ChatMessage> messages) throws IOException, InterruptedException;
+    ChatMessage complete(List<ChatMessage> messages, List<ToolDefinition> tools)
+            throws IOException, InterruptedException;
 }
