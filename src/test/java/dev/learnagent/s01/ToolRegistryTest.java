@@ -5,10 +5,62 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class ToolRegistryTest {
+    @Test
+    void permissionRunsBeforeToolAndUnknownToolsDoNotAsk() throws Exception {
+        AtomicInteger executions = new AtomicInteger();
+        AtomicInteger checks = new AtomicInteger();
+        AgentTool tool = new AgentTool() {
+            public ToolDefinition definition() {
+                return new ToolDefinition("write", "test", new JSONObject());
+            }
+
+            public String execute(String arguments) {
+                executions.incrementAndGet();
+                return arguments;
+            }
+        };
+        ToolRegistry registry = new ToolRegistry(List.of(tool), call -> {
+            checks.incrementAndGet();
+            return "allowed".equals(call.arguments()) ? null : "test denied";
+        });
+        assertTrue(registry.execute(new ToolCall("a", "write", "denied")).startsWith("权限拒绝"));
+        assertEquals(0, executions.get());
+        assertEquals("allowed", registry.execute(new ToolCall("b", "write", "allowed")));
+        assertEquals(1, executions.get());
+        assertTrue(registry.execute(new ToolCall("c", "unknown", "{}")).contains("未知工具"));
+        assertEquals(2, checks.get());
+    }
+
+    @Test
+    void permissionFailuresDoNotExecuteAndDoNotLeakDetails() throws Exception {
+        AgentTool unexpected = new AgentTool() {
+            public ToolDefinition definition() {
+                return tool("write").definition();
+            }
+
+            public String execute(String arguments) {
+                fail("权限检查失败后不能执行工具");
+                return "";
+            }
+        };
+        for (ToolPermission permission : List.<ToolPermission>of(
+                call -> { throw new IOException("private"); },
+                call -> { throw new IllegalStateException("private"); })) {
+            String result = new ToolRegistry(List.of(unexpected), permission)
+                    .execute(new ToolCall("a", "write", "{}"));
+            assertTrue(result.startsWith("权限拒绝"));
+            assertFalse(result.contains("private"));
+        }
+        assertThrows(InterruptedException.class, () -> new ToolRegistry(List.of(unexpected), call -> {
+            throw new InterruptedException();
+        }).execute(new ToolCall("a", "write", "{}")));
+    }
+
     @Test
     void preservesRegistrationOrderAndDispatchesByExactName() throws Exception {
         ToolRegistry registry = new ToolRegistry(List.of(tool("a"), tool("b")));

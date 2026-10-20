@@ -1,8 +1,8 @@
 # Java Agent 实战
 
-当前实现 s01 Agent Loop 和 s02 Tool Use：通过 OpenAI 兼容接口对话，程序执行模型请求的工具并回传结果，再请求模型，直到给出最终回答。支持一次回复中的多个工具调用，按返回顺序执行。输入 `exit`、`quit` 或遇到输入结束时退出。
+当前实现 s01 Agent Loop、s02 Tool Use 和 s03 Permission：通过 OpenAI 兼容接口对话，程序执行模型请求的工具并回传结果，再请求模型，直到给出最终回答。支持一次回复中的多个工具调用，按返回顺序执行。输入 `exit`、`quit` 或遇到输入结束时退出。
 
-使用 JDK 17、Maven、Hutool 和 fastjson2。s01 只提供 `shell`；s02 新增文件读写、编辑、查找和按名称分派工具的注册表。
+使用 JDK 17、Maven、Hutool 和 fastjson2。s01 只提供 `shell`；s02 新增文件工具和注册分派；s03 基于 S02 在执行前增加权限规则和逐次用户确认。
 
 ## 构建与启动
 
@@ -24,6 +24,9 @@ openai.api-key=你的密钥
 
 # 第二课（引号保证 PowerShell 正确传递 Maven 属性）
 .\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s02.ToolUseMain"
+
+# 第三课
+.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s03.PermissionMain"
 ```
 
 也可直接使用已安装的 Maven，例如 `mvn test`、`mvn package`、`mvn -q compile exec:java`。Wrapper 固定 Maven 3.9.3，首次运行需联网下载 Maven 和依赖。`package` 生成普通 JAR，运行时通过 `exec:java` 加载依赖。
@@ -33,7 +36,7 @@ openai.api-key=你的密钥
 | `openai.base-url` | 服务商的 API 基础地址，保留其要求的路径前缀；程序追加 `/chat/completions` | 省略时使用 `https://api.openai.com/v1` |
 | `openai.model` | 服务商支持的模型 ID | 必填 |
 | `openai.api-key` | API 密钥，仅在本地设置 | 必填 |
-| `agent.work-dir` | Shell 及 S02 文件工具的工作目录；相对路径以程序启动目录为基准，不存在时自动创建 | `playground` |
+| `agent.work-dir` | Shell 及文件工具的工作目录；相对路径以程序启动目录为基准，不存在时自动创建 | `playground` |
 | `agent.max-model-calls` | 每次用户输入最多请求模型的次数，包含最终回答请求 | `10` |
 | `shell.timeout-seconds` | 每条 Shell 命令的超时秒数 | `30` |
 | `shell.max-output-chars` | 每条命令保留的输出字符数（不含状态和截断提示） | `12000` |
@@ -58,7 +61,7 @@ openai.api-key=你的密钥
 
 Windows 使用 `powershell.exe -NoProfile -NonInteractive`，Unix 使用 `/bin/sh`。每次调用启动独立进程，`cd` 和变量不会跨调用保留。标准输出和错误输出合并，超过长度限制后继续排空管道，仅保留前面的字符。超时或中断时尽力终止仍可枚举到的进程树；第一课不支持后台任务管理。PowerShell 输出设置为 UTF-8，外部程序也需要输出 UTF-8 才能正确解码。
 
-`shell` 会真实执行模型提出的命令，具有当前用户的权限。工作目录不是系统沙箱，命令仍可访问其他路径；许可机制属于后续 s03。
+`shell` 会真实执行模型提出的命令，具有当前用户的权限。工作目录不是系统沙箱，命令仍可访问其他路径；S01、S02 不询问权限，S03 增加执行前规则和确认。
 
 ## 从哪里读代码
 
@@ -90,7 +93,7 @@ Windows 使用 `powershell.exe -NoProfile -NonInteractive`，Unix 使用 `/bin/s
 
 文件工具检查规范化路径和已有祖先的真实路径，拒绝越出工作目录；`glob` 不递归进入目录链接或 Windows junction。读取和编辑的源文件、写入后的内容最多 1 MiB；读取结果最多 12000 个内容字符；查找按相对路径排序，最多返回 200 条，并标注截断。路径模式使用 `/` 分隔，支持 `*`、`?`、独立路径段 `**` 以及 JDK 单路径段 glob 语法。
 
-这些检查不是系统沙箱，不防御其他进程并发替换路径或硬链接；Shell 仍具有当前用户权限。许可规则留到 S03。
+这些检查不是系统沙箱，不防御其他进程并发替换路径或硬链接；Shell 仍具有当前用户权限。S03 在这些检查之外增加许可规则。
 
 启动 S02 后可输入：
 
@@ -102,6 +105,23 @@ Windows 使用 `powershell.exe -NoProfile -NonInteractive`，Unix 使用 `/bin/s
 
 S02 在 S01 上增量开发，共用原有 `ChatLoop`、配置、模型客户端、消息协议和 Shell。原循环通过 `ToolRegistry` 从单工具扩展到多工具，S01 入口只注册 Shell，S02 入口再注册四个文件工具；两课共用一份循环实现。详见[第二课讲解与练习](docs/lessons/s02-tool-use.md)。
 
+## 第三课：Permission
+
+入口为 `dev.learnagent.s03.PermissionMain`，复用 S02 的五个工具及同一份 `s01.ChatLoop`，在 `ToolRegistry` 执行工具前检查权限。沿用已有配置，没有新增配置项。
+
+| 调用 | 默认行为 |
+| --- | --- |
+| 工作目录内的 `read_file`、`glob` | 直接执行 |
+| `write_file`、`edit_file` | 显示完整参数，逐次询问 |
+| `shell` | 命中硬拒绝规则则拒绝，其余逐次询问 |
+| 文件路径越界，或无法完成权限检查 | 拒绝，不执行工具 |
+
+确认只接受 `y` / `yes`（忽略大小写及首尾空白），其余输入、空行或 EOF 均拒绝。批准只针对本次调用，确认答案不进入聊天历史。拒绝仍按原调用 ID 回传模型。确认处的 `exit` / `quit` 表示拒绝当前调用；回到 `你>` 后输入才退出对话。
+
+可以先要求“只用 write_file 在 s03-demo/note.txt 写入第一版，被拒绝就停止”，输入 `n` 观察未执行；下一轮重新明确请求并输入 `y`。再用 `read_file` 验证内容，读取无需确认。
+
+硬拒绝是示例关键词/正则规则，可能误报且不能完整识别 Shell；授权 Shell 后仍以当前用户权限执行，不构成系统沙箱。规则代码位于 `s03/PermissionPolicy.java`，终端确认位于 `PermissionGate.java`。详见[第三课原理与练习](docs/lessons/s03-permission.md)。
+
 ## 验证边界
 
 2026-10-20 使用 JDK 17.0.2 和 Maven Wrapper 3.9.3 完成 `package`，55 项自动测试全部通过，普通 JAR 构建成功。自动测试使用模拟模型、本地 HTTP 服务和临时目录中的真实 Shell，验证协议和程序行为。
@@ -109,3 +129,5 @@ S02 在 S01 上增量开发，共用原有 `ChatLoop`、配置、模型客户端
 本地配置的真实模型已通过“列出目录、读取中文练习文件 → 工具结果回传 → 最终回答 → 历史追问 → 退出”的验收。Windows PowerShell 已在本机验证；Unix 分支尚未在本机运行。详见 [S01 收尾验证记录](docs/JAVA_PRACTICE_SPEC.md#s01-收尾验证记录)。
 
 2026-10-20 S02 完成后再次执行 `package`：共 102 项测试，101 项通过、1 项跳过，无失败或错误。跳过项需要 Windows 符号链接权限；Windows junction 越界检查已实际通过。真实模型完成“写入中文文件 → 精确编辑 → 读回 → glob 查找 → 历史追问 → 退出”。S01 原启动命令也已验证。详见 [S02 验证记录](docs/JAVA_PRACTICE_SPEC.md#s02-验证记录)。
+
+同日 S03 完成后执行 `package`：共 154 项测试，153 项通过、1 项因符号链接权限跳过，无失败或错误。真实模型通过“拒绝写入且文件不存在 → 批准新文件写入 → 无确认读取 → 退出”，S01 / S02 入口均正常。详见 [S03 验证记录](docs/JAVA_PRACTICE_SPEC.md#s03-验证记录)。

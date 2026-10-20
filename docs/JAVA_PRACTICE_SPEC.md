@@ -1,6 +1,6 @@
 # 用 Java 实战 Learn Claude Code
 
-状态：按逐步实战推进；已选择 OpenAI 兼容接口。s01 已完成 Windows 本机测试、打包和真实模型验收；s02 已实现文件读写、编辑、查找与工具分派，验证记录见文末。
+状态：按逐步实战推进；已选择 OpenAI 兼容接口。已实现 s01 对话循环、s02 文件工具与分派、s03 权限规则和逐次确认，验证记录见文末。
 
 ## 目标与现状
 
@@ -23,7 +23,7 @@
 
 ## 课程范围
 
-以下为完整课程的规划；当前实现 s01 的多轮对话和 Shell 工具循环及 s02 的文件工具与分派，其余内容待逐步推进。
+以下为完整课程的规划；当前实现至 s03，三课基于同一循环增量扩展，其余内容待逐步推进。
 
 | 课次 | 主题 | Java 实战产出 |
 | --- | --- | --- |
@@ -56,8 +56,11 @@ src/main/java/dev/learnagent/s01/   # 第一课入口与循环
 src/test/java/dev/learnagent/s01/   # 第一课行为测试
 src/main/java/dev/learnagent/s02/   # 第二课入口、工具分派和文件工具
 src/test/java/dev/learnagent/s02/   # 文件工具、循环和 HTTP 集成测试
+src/main/java/dev/learnagent/s03/   # 权限规则、确认器和第三课入口
+src/test/java/dev/learnagent/s03/   # 权限策略、确认及循环集成测试
 docs/lessons/s01-agent-loop.md     # 原理、运行步骤与练习
 docs/lessons/s02-tool-use.md       # 第二课讲解、工具约定与练习
+docs/lessons/s03-permission.md     # 第三课原理、权限规则与练习
 playground/                       # 练习工作目录
 ```
 
@@ -99,6 +102,7 @@ S01 按用户确认的三个步骤推进：先对话循环，再对话加工具�
 .\mvnw.cmd package
 .\mvnw.cmd -q compile exec:java
 .\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s02.ToolUseMain"
+.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s03.PermissionMain"
 ```
 
 运行前填写项目根目录的 `config.properties`，包含 `openai.base-url`、`openai.model` 和 `openai.api-key`，具体说明见根目录 README。配置以 UTF-8 读取，不使用 API 环境变量。本地配置文件已加入 Git 忽略规则；密钥不出现在示例、日志或提交中。
@@ -117,7 +121,7 @@ record ToolResult(String callId, String output, boolean error) {}
 
 始终：保留已完成课程的运行方式；记录与上游的差异；运行所改行为的测试；真实调用与模拟结果分别说明。
 
-已确认：逐步实现，OpenAI 兼容接口，当前推进至第二课工具使用。后续如要变更 Java 主版本或改为 Web 应用，再讨论范围。
+已确认：逐步实现，先讲原理再基于已有代码实现，OpenAI 兼容接口，当前推进至第三课权限控制。后续如要变更 Java 主版本或改为 Web 应用，再讨论范围。
 
 禁止：提交密钥、将未运行的命令标记为验证通过、将简单命令过滤描述成可靠沙箱。
 
@@ -211,3 +215,54 @@ $env:JAVA_HOME = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
 另外以 `exit` 输入运行原 S01 启动命令，确认仍显示第一课工具并正常退出。
 
 本次真实验收只代表本地配置服务商的基本文件工具闭环成功；错误恢复与多工具同批协议由离线测试验证。Unix 分支及需要权限的符号链接测试尚未在本机验证。当前范围截至 S02，未实现 S03 许可机制。
+
+## S03 验证记录
+
+日期：2026-10-20。环境：Windows PowerShell、JDK 17.0.2、Maven Wrapper 3.9.3。
+
+先介绍“执行前决策、硬拒绝优先、按次确认、拒绝结果回传”的机制，再在 S02 上增量实现。新增 `ToolPermission` 接口和 `s03` 包中的 `PermissionPolicy`、`PermissionGate`、`PermissionMain`；现有 `ToolRegistry` 增加可选检查器，`ToolUseMain.createTools` 增加权限参数，`WorkspaceFiles.resolve` 开放给策略复用。本课没有修改或复制 `ChatLoop`，没有复制 Shell 和文件工具。
+
+默认规则：工作区内读取与查找直接执行，写入、编辑以及未命中硬拒绝的 Shell 调用逐次询问；越界文件路径和示例硬拒绝规则直接拒绝。确认只接受 `y` / `yes`，其他输入或 EOF 拒绝，不保存跨调用授权。没有新增配置项。规则与上游差异见 [s03-permission.md](lessons/s03-permission.md)。
+
+### 自动测试与构建
+
+仅在当前验证进程选择系统级 JDK 17：
+
+```powershell
+$env:JAVA_HOME = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
+.\mvnw.cmd package
+```
+
+结果为 `BUILD SUCCESS`，共 154 项测试：153 项通过、1 项跳过，失败和错误均为 0。唯一跳过项仍是 S02 的 Windows 符号链接权限测试。
+
+| 范围 | 数量 | 结果 |
+| --- | --- | --- |
+| S01 / S02 原有测试 | 102 | 101 通过，1 跳过 |
+| 注册表权限检查新增测试 | 2 | 全部通过 |
+| `PermissionPolicyTest` | 30 | 全部通过 |
+| `PermissionGateTest` | 15 | 全部通过 |
+| `PermissionLoopTest` | 5 | 全部通过 |
+
+覆盖允许、拒绝、询问、硬拒绝优先级、无效参数、越界路径、未知规则默认拒绝、确认答案大小写、空输入、EOF、输入失败、检查器异常与中断。循环集成验证混合调用的全部 ID、拒绝不写文件、授权不延续到下一次编辑、确认输入不进入聊天历史、调用上限不询问不执行，以及已批准的编辑和无副作用 Shell 命令。
+
+危险命令只作为权限策略的待分类字符串；实际 Shell 执行测试使用 `echo permission-ok`。S01 / S02 现有本地 HTTP 模拟协议测试也通过。
+
+### 真实模型验收
+
+使用已有本地 `config.properties`，未修改配置或记录密钥，运行：
+
+```powershell
+.\mvnw.cmd -q compile exec:java "-Dexec.mainClass=dev.learnagent.s03.PermissionMain"
+```
+
+验收输入由测试脚本按顺序提供，包括明确的单次 `n` 和 `y` 答案，限定只操作新建目录 `s03-check-67d75abf` 内的两个文件，不调用 Shell：
+
+1. 模型请求 `write_file` 创建 `denied.txt`，程序显示调用 ID、完整参数和权限询问。输入 `n` 后，工具结果返回“权限拒绝、工具未执行”，模型回答“未执行”。
+2. 下一轮明确请求创建 `allowed.txt`，内容“已批准的中文内容”。程序再次询问，输入 `y` 后写入成功，返回 24 个 UTF-8 字节。
+3. 下一轮请求 `read_file`，无需确认即读回准确内容，模型据实回答。
+4. 输入 `exit`，程序正常结束，进程退出码为 0。
+5. 直接检查文件系统，确认 `denied.txt` 不存在、`allowed.txt` 内容完全一致，然后清理本次临时文件及空目录。
+
+分别对 S01、S02 原启动命令提供 `exit`，两个入口均正常启动并结束。用户已有的学习笔记和 `playground/example.txt` 改动未修改。
+
+真实验收覆盖拒绝、单次批准及无确认读取；其他规则与协议边界由自动测试覆盖。Shell 权限规则是文本匹配而非沙箱；Unix 分支及受本机权限限制的符号链接测试未在本机验证。当前实现截至 S03，未进入 S04。

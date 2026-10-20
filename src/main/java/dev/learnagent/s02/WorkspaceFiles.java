@@ -25,7 +25,7 @@ public final class WorkspaceFiles {
         return root;
     }
 
-    Path resolve(String value) throws IOException {
+    public Path resolve(String value) throws IOException {
         Path candidate = root.resolve(value).normalize();
         if (!candidate.startsWith(root)) {
             throw new IllegalArgumentException("路径超出工作目录。");

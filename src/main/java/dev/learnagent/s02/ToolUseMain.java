@@ -6,6 +6,7 @@ import dev.learnagent.s01.ModelClient;
 import dev.learnagent.s01.OpenAiClient;
 import dev.learnagent.s01.ShellTool;
 import dev.learnagent.s01.ToolRegistry;
+import dev.learnagent.s01.ToolPermission;
 
 import java.io.BufferedReader;
 import java.io.Console;
@@ -18,7 +19,7 @@ import java.time.Duration;
 import java.util.List;
 
 public final class ToolUseMain {
-    static final String SYSTEM_PROMPT = "你是一个编程助手，请用中文回答。"
+    public static final String SYSTEM_PROMPT = "你是一个编程助手，请用中文回答。"
             + "文件查找、读取、写入和编辑优先使用 glob、read_file、write_file、edit_file，其他命令使用 shell。"
             + "文件路径以 shell 描述中的工作目录为基准，文本使用 UTF-8，glob 使用 / 分隔。"
             + "根据真实工具结果回答；工具错误可修正后再次调用，不要把失败描述为成功。";
@@ -27,10 +28,15 @@ public final class ToolUseMain {
     }
 
     public static ToolRegistry createTools(AgentConfig config) throws IOException {
+        return createTools(config, call -> null);
+    }
+
+    public static ToolRegistry createTools(AgentConfig config, ToolPermission permission) throws IOException {
         WorkspaceFiles files = new WorkspaceFiles(config.workDirectory());
         return new ToolRegistry(List.of(
                 new ShellTool(files.root(), config.shellTimeout(), config.maxOutputChars()),
-                new ReadFileTool(files), new WriteFileTool(files), new EditFileTool(files), new GlobTool(files)));
+                new ReadFileTool(files), new WriteFileTool(files), new EditFileTool(files), new GlobTool(files)),
+                permission);
     }
 
     public static void main(String[] args) {
