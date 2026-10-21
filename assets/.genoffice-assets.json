@@ -2,18 +2,28 @@
   "version": 1,
   "files": [
     {
-      "name": "agent_tool.png",
-      "sha256": "2e62b1c4c72b215b34b9263cb0575b7d1077093b34c1e6ca76c412bd91b5a2a5"
+      "name": "agent-chat.png",
+      "sha256": "d6ec5657db2e5f2a9f2f482a4902eb199b7d9d800ea8f98113de86acc4de21b1"
     },
     {
-      "name": "mermaid-diagram.png",
-      "sha256": "b96693de77ab954fe7fa7b792f1ae6c1fc83e25ad3c5aa0c19d1d649fd202a5a"
+      "name": "agent-hoots.png",
+      "sha256": "94e1a645edc8336339128a980169c31aca3d8b616b2f317e2685886b0daae3cd"
+    },
+    {
+      "name": "agent-perm1.png",
+      "sha256": "772a8c8102ae966c1ff43084a1b3a88d19cb183d18075cd6572f6615e694ab9f"
+    },
+    {
+      "name": "agent-tool1.png",
+      "sha256": "53dcf0eadb4b963acb63094cf03c27524bc016c82029a921ec964e4f645800fa"
     }
   ],
   "documents": {
     "AI创建Agent.md": [
-      "agent_tool.png",
-      "mermaid-diagram.png"
+      "agent-chat.png",
+      "agent-hoots.png",
+      "agent-perm1.png",
+      "agent-tool1.png"
     ]
   },
   "pending": {}
