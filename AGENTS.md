@@ -2,13 +2,14 @@
 
 ## 项目结构与模块组织
 
-五个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
+六个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
 
 - `s01`：最小文本对话，无工具；入口 `dev.learnagent.s01.AgentLoopMain`。
 - `s02`：基于 S01 增加单工具、多工具分派、Shell 和文件工具；入口 `dev.learnagent.s02.ToolUseMain`。
 - `s03`：基于 S02 增加权限策略和逐次确认；入口 `dev.learnagent.s03.PermissionMain`。
 - `s04`：基于 S03 增加四类 Hook；入口 `dev.learnagent.s04.HooksMain`。
 - `s05`：基于 S04 增加 TodoWrite 任务清单；入口 `dev.learnagent.s05.TodoMain`。
+- `s06`：基于 S05 增加 Subagent 子代理；入口 `dev.learnagent.s06.SubagentMain`。
 
 每课有完整源码、测试、POM、配置示例与 README；类全部在本模块的 `dev.learnagent.s0N` 包及其子包。后续课复制前一课阶段源码后修改扩展，不通过跨模块 Java 依赖或 common 工程隐藏实现。用户已明确用教学快照替代旧版“共用一份循环、不复制”的要求。
 
@@ -21,6 +22,8 @@ S04 命令 Hook 固定加载本子项目的 `s04/.agents/hook.json`，不受进�
 用户 JSON Hook 必须经过独立的 HookTrust 启用确认，不能复用或绕过 S03 工具审批。首次或内容变化时支持 y/yes 记忆授权、once 单次会话、其余及 EOF 不启用；拒绝仍保留 Java Hook。HookTrustStore 默认写入用户目录 `.java-agent/hook-trust/`，项目 JSON 不得自授信任。HookTrustSnapshot 校验配置、字面量脚本和 trust_files 的内容，执行前检测变化；失效后前置拦截、后置告警，重启再确认。测试必须使用临时信任存储，不写真实用户记录。内容摘要不是脚本安全证明或系统沙箱。
 
 S05 与 S04 分包相同，根包只保留 `TodoMain`，`HooksMain` 移入 `app` 并提供 `createHooks`；新增 `s05.todo`：`TodoStatus`、`TodoItem`、`TodoList`、`TodoWriteTool`、`TodoReminder`。清单只在会话内存中整体替换，失败不改状态；`todo_write` 免权限确认但仍经过 Hook。提醒附加到本批最后一个工具结果，不新增消息角色，上限批次不附加。Hook 配置固定为 `s05/.agents/hook.json`。
+
+S06 根包只保留 `SubagentMain`，`TodoMain` 移入 `app`；新增 `s06.subagent`：`SubagentRunner`、`TaskTool`。子代理每次 `task` 新建历史，不复制主历史，只返回最终总结；只有五个基础工具，不能递归派生、不改主清单。`task` 免权限确认，子代理工具调用仍经过同一权限与 Hook 链；`ChatLoop` 不修改。Hook 配置固定为 `s06/.agents/hook.json`。
 
 ## 构建与测试
 

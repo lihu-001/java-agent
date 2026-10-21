@@ -1,6 +1,6 @@
 # Java Agent 实战规范
 
-当前采用五个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite。
+当前采用六个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent。
 
 ## 模块边界
 
@@ -11,6 +11,7 @@
 | s03 | dev.learnagent.s03 / PermissionMain | 在工具分派前增加许可策略和逐次确认 |
 | s04 | dev.learnagent.s04 / HooksMain | 四类生命周期 Hook、JSON 命令配置与 Java 回调 |
 | s05 | dev.learnagent.s05 / TodoMain | todo_write 会话内任务清单与未更新提醒 |
+| s06 | dev.learnagent.s06 / SubagentMain | task 子代理，独立消息历史，只回传总结 |
 
 每课是前一课的源码快照加增量修改，拥有独立源码、测试、POM、配置示例、README。各模块不依赖其他课的 JAR 或源码，不使用共用 Java 核心。根 POM 为 packaging=pom，只聚合各课、管理依赖和插件版本。
 
@@ -31,6 +32,8 @@ S04 固定从本子项目的 `.agents/hook.json` 加载用户配置，与启动�
 用户命令注册前必须通过 HookTrust 独立信任确认。y/yes 记忆授权，once 只授权本次会话，其他输入或 EOF 不启用用户命令但保留 Java 回调。HookTrustStore 按规范化项目路径在用户目录 `.java-agent/hook-trust/` 存储内容摘要，项目 JSON 不能自行声明信任；记录损坏、缺失或不可读时重新确认，保存失败仅本次有效。HookTrustSnapshot 跟踪配置、命令中可识别的字面量脚本以及 trust_files 声明的普通文件，确认期间及每次执行前校验内容。运行中变化则该会话的用户 Hook 失效，前置阻止、后置告警，重启后重新授权。确认答案不进入模型历史，信任 Hook 不代替 S03 工具审批。这是启用授权和变更检测，不是代码安全分析或系统沙箱。
 
 S05 以 S04 完整源码为起点，新增 todo.TodoStatus、TodoItem、TodoList、TodoWriteTool、TodoReminder 和根包 TodoMain；S04 的 HooksMain 移入 app 并抽出 createHooks，注册顺序不变。todo_write 每次整体替换会话内存清单：最多 20 项，内容去空白后非空且不超过 200 字符，最多一项 in_progress，未知字段或状态拒绝；失败返回工具错误且不改状态。PermissionPolicy 对其直接允许，但仍经过 PreToolUse/PostToolUse。TodoReminder 每轮输入清零，每批工具后按清单版本号计数；连续 3 批未更新且清单为空或有未完成项时，提醒附加到本批最后一个工具结果末尾，不新增消息角色；达到模型调用上限的批次不附加。清单不持久化，不验证步骤真实完成。Hook 配置固定为 `s05/.agents/hook.json`，默认空。详见 [S05 课程](lessons/s05-todo-write.md)。
+
+S06 以 S05 完整源码为起点，新增 subagent.SubagentRunner、TaskTool 和根包 SubagentMain；S05 的 TodoMain 移入 app，ChatLoop 不修改。task 参数为 description（去空白后非空，≤40 字符）与 prompt（≤8000 字符），未知字段拒绝。SubagentRunner 每次新建历史，只含子代理系统提示词与 prompt，不复制主历史；执行工具直到无工具调用的最终回复，返回去空白后的文字，结束即丢弃历史。子代理每次 task 最多请求 agent.max-model-calls 次，达到上限时最后一批不执行，返回未完成说明。结果超过 12000 字符截断；模型请求超时或失败转为工具错误，不回滚已执行操作。子代理只有五个基础工具，无 task（禁止递归）和 todo_write（不改主清单），与主代理共用同一 PermissionGate 和 AgentHooks：task 直接允许，子代理的写入、编辑、Shell 仍逐次确认；PreToolUse/PostToolUse 两层都触发，Hook 拦截 task 时子代理不启动；UserPromptSubmit、Stop 和清单提醒只属于主循环。Hook 配置固定为 `s06/.agents/hook.json`，默认空。详见 [S06 课程](lessons/s06-subagent.md)。
 
 保留前一课的组装类便于代码对照；启动应使用各模块 POM 的默认入口。例如 s04 默认 HooksMain，直接手动运行保留的 app.ToolUseMain 不会启用权限和 Hook。
 
@@ -65,7 +68,7 @@ Shell 危险命令只作为待分类字符串；真实执行用无副作用命�
 
 ## 后续课程
 
-S06 Subagent、S07 Skill Loading、S08 Context Compact、S09 Memory、S10 Task System、S11 Background Tasks、S12 Cron Scheduler、S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
+S07 Skill Loading、S08 Context Compact、S09 Memory、S10 Task System、S11 Background Tasks、S12 Cron Scheduler、S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
 
 ## 模块拆分验证
 
@@ -122,3 +125,9 @@ S06 Subagent、S07 Skill Loading、S08 Context Compact、S09 Memory、S10 Task S
 2026-10-21，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S04 为 s05 并重命名包，新增 todo 包与 TodoMain，父 POM 聚合 s05。根目录 `.\mvnw.cmd -B package` 五模块全部成功：共 836 项测试，832 通过、4 项 Windows 符号链接权限跳过，无失败或错误。S01—S04 分别为 24、102、154、265 项，与上次一致；S05 共 291 项、290 通过、1 跳过，其中新增 26 项（另在权限策略测试中补充 todo_write 断言）覆盖清单校验与失败不改状态、工具参数、提醒计数与每轮清零、提醒附加位置及消息顺序、跨轮保留、上限批次不提醒、Hook 拦截、todo_write 免确认而写文件仍需确认。
 
 根目录 `-pl s05 exec:java` 与 `-pl s04 exec:java` 输入 exit 正常启动退出，S05 显示六个工具并读取 `s05/.agents/hook.json`。S01—S04 源码未修改。没有请求真实模型服务；模型是否主动使用清单需真实服务单独验收。
+
+## S06 Subagent 验证
+
+2026-10-21，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S05 为 s06 并重命名包，新增 subagent 包与 SubagentMain，父 POM 聚合 s06。根目录 `.\mvnw.cmd -B package` 六模块全部成功：共 1143 项测试，1138 通过、5 项 Windows 符号链接权限跳过，无失败或错误。S01—S05 分别为 24、102、154、265、291 项，与上次一致；S06 共 307 项、306 通过、1 跳过，其中新增 16 项（另在权限策略测试中补充 task 断言）覆盖子代理全新且互相独立的历史、只返回最终文字、上限时不执行最后一批、空回复与请求失败、task 参数校验与结果截断、主代理看不到子代理读到的内容、子代理工具不含 task/todo_write、子代理写入仍需确认、两层 Hook 顺序、Hook 拦截 task 时子代理不启动、子代理不能改动主清单。
+
+根目录 `-pl s06 exec:java` 正常启动，显示七个工具并读取 `s06/.agents/hook.json`。PowerShell 管道输入的 exit 被记为 5 字符（推测带 BOM），未被识别为退出命令，作为普通提示词向根配置的真实模型请求了一次，模型直接回复且无工具调用，Hook 与 Stop 正常触发，EOF 后退出。S01—S05 源码未修改。模型是否在合适时机主动派发子代理需真实服务单独验收。

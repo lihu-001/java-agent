@@ -11,6 +11,7 @@
         <module>s03</module>
         <module>s04</module>
         <module>s05</module>
+        <module>s06</module>
     </modules>
     <properties>
         <maven.compiler.release>17</maven.compiler.release>
