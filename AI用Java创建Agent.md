@@ -787,3 +787,254 @@ case "load_skill" -> new Decision(Action.ALLOW, "只读取技能目录中的说�
 - 正文加载后就留在对话历史里，之后每一轮都会随请求发送。按需加载省掉的是"用不上的技能"，用上的技能照样占上下文。
 
 Skill Loading 的定位是"用一次工具调用，换系统提示词的精简"。目录要短，描述要准，模型才能在该用的时候想起它。对话越来越长、历史越来越大的问题，下一课 Context Compact 再解决。
+
+
+
+# S08、Context Compact 上下文压缩
+
+S06 把探索过程关进了子代理，S07 把操作规范挪到了磁盘上。但主对话本身还是只增不减：每读一个文件、每跑一次命令，结果都留在历史里，之后每次请求都要重新发一遍。聊得越久，请求越慢、越贵，最后超过模型的上下文窗口，直接请求失败。
+
+解决办法是在每次请求模型之前，先把历史整理一遍。这就是 Context Compact。
+
+整理分三层，代价从低到高：
+
+1、**微压缩**。较早的长工具结果，换成一行占位说明。不请求模型，每次都做。
+
+2、**自动压缩**。微压缩后对话还是太长，就先把完整记录存到文件里，再请模型写一份摘要，用摘要代替全部历史。
+
+3、**手动压缩**。模型自己觉得该收拾了，调用 `compact` 工具，触发和第 2 层一样的总结。
+
+核心流程如下：
+
+```text
+ChatLoop 每次请求模型前
+  └─ ContextCompactor.beforeRequest()
+       ├─ 1. 微压缩：旧的长工具结果 → "[已压缩] 较早的 read_file 工具结果（原 N 字符）……"
+       ├─ 2. 对话超过阈值？        ┐
+       └─ 3. 上一批调用了 compact？┘→ 保存完整记录 → 模型总结 → 历史 = 系统提示词 + 摘要
+```
+
+**第一层：微压缩**
+
+上下文里最占地方的通常是工具结果。读一个文件动辄几千字，但模型读完、用完，几步之后就很少再需要原文了。
+
+所以微压缩只保留最近 3 个工具结果的原文，更早的、超过 200 字符的，换成一句说明：
+
+```text
+[已压缩] 较早的 read_file 工具结果（原 3812 字符）已从上下文移除，需要时请重新调用工具获取。
+```
+
+```java
+public static List<ChatMessage> apply(List<ChatMessage> messages, int keepRecent) {
+    // ……先统计工具结果总数，算出前面有几个可以压缩
+    int compactable = toolResults - keepRecent;
+    for (ChatMessage message : messages) {
+        if ("tool".equals(message.role()) && seen++ < compactable) {
+            String name = toolNames.getOrDefault(message.toolCallId(), "未知");
+            String content = message.content() == null ? "" : message.content();
+            if (content.length() > MIN_COMPACT_CHARS && !EXEMPT_TOOLS.contains(name)) {
+                message = ChatMessage.tool(message.toolCallId(), PLACEHOLDER_PREFIX + "较早的 " + name
+                        + " 工具结果（原 " + content.length() + " 字符）已从上下文移除，需要时请重新调用工具获取。");
+            }
+        }
+        result.add(message);
+    }
+    return result;
+}
+```
+
+注意替换的只是内容，`tool_call_id` 和消息顺序都不变。S02 讲过，每个工具调用都要有对应 ID 的结果，这条协议压缩后照样成立。
+
+有几类工具结果不替换：
+
+```java
+/** 这些工具的结果本身就是总结或说明，重新获取代价高或会改变状态，不做替换。 */
+public static final Set<String> EXEMPT_TOOLS = Set.of("task", "load_skill", "todo_write", "compact");
+```
+
+`task` 的结果是子代理的总结，想重新拿到就得把子任务重跑一遍；`load_skill` 的正文模型正照着执行；另外两个结果本来就很短。
+
+**微压缩改的是哪份历史？**
+
+只改发给模型的那份，内存里的历史仍然是原文：
+
+```java
+public record Prepared(List<ChatMessage> history, List<ChatMessage> sent, boolean summarized) {
+}
+```
+
+`history` 是程序接着保存的，`sent` 才是这次真正发出去的。原文保留下来，第二层存记录时才有完整内容可存。代价是每次请求都要重新算一遍，对几十条消息来说可以忽略。
+
+**第二层：自动压缩**
+
+微压缩后，如果对话的字符数仍然超过 `compact.threshold-chars`（默认 50000），就做一次真正的总结，分三步：
+
+1、**先存档**。把内存里的原文历史写到工作目录 `.transcripts/transcript-时间.jsonl`，一行一条消息。
+
+```java
+// 记录保存完整原文；记录写不出来就不总结，否则被替换的内容将无从找回。
+Path file = store.save(history);
+```
+
+顺序很重要：先存，存成功了再总结。存不下来就宁可不压缩。
+
+2、**请模型总结**。用一份专门的总结提示词，把对话渲染成文本交给模型。这次请求**不带任何工具**，模型只能写字：
+
+```java
+public static final String SUMMARIZER_PROMPT = "你负责压缩一段编程助手与用户的对话，让助手只凭摘要就能继续工作。"
+        + "用中文分条写出：用户的目标与明确要求；已完成的操作与关键结果（文件路径、命令、结论）；"
+        + "当前进展、未完成事项与下一步；用户的约束和偏好。只依据对话记录，不要编造，不要输出客套话。";
+```
+
+```java
+ChatMessage answer = client.complete(List.of(new ChatMessage("system", SUMMARIZER_PROMPT + instruction),
+        new ChatMessage("user", render(body))), List.of());
+```
+
+3、**替换历史**。整段历史换成两条消息：原系统提示词，加一条摘要。
+
+```text
+system：原系统提示词（不动）
+user：  [对话已压缩] 之前的对话已被总结，完整记录保存在工作目录的 .transcripts/transcript-….jsonl，
+        需要原文细节时可用 read_file 读取。
+
+        摘要：
+        ……模型写的摘要……
+
+        程序保存的当前状态（不是摘要，以此为准）：
+        任务清单（1/3 完成）：……
+
+        用户最新输入（原文）：
+        ……
+```
+
+这条摘要消息里有三个细节：
+
+- **告诉模型记录在哪**。摘要难免丢细节，模型需要原文时可以自己用 `read_file` 去读。记录在工作目录里，S02 的文件工具本来就能读到。
+- **程序有的状态，不让模型复述**。S05 的任务清单是程序保存在内存里的，直接把原文贴上，比让模型在摘要里转述一遍可靠。
+- **用户最新的话原样保留**。本轮刚输入、还没得到回复的那句话不交给模型总结，避免它被改写或漏掉。
+
+```java
+String current = state == null ? null : state.get();
+if (StrUtil.isNotBlank(current)) {
+    text.append("\n\n程序保存的当前状态（不是摘要，以此为准）：\n").append(current);
+}
+if (latestInput != null) {
+    text.append("\n\n用户最新输入（原文）：\n").append(latestInput);
+}
+```
+
+任务清单是在组装时传进去的：
+
+```java
+// 任务清单由程序保存，压缩后原样附在摘要后面，不依赖模型复述。
+ContextCompactor compactor = new ContextCompactor(client,
+        new TranscriptStore(files.root().resolve(TranscriptStore.DIRECTORY_NAME)), files.root(),
+        config.compactThresholdChars(), config.compactKeepToolResults(),
+        () -> todos.items().isEmpty() ? null : todos.render());
+```
+
+**阈值为什么不算系统提示词？**
+
+系统提示词是固定开销，压缩也压不掉它。如果把它算进阈值，阈值设得比较小时，刚压缩完对话还是"超标"，下一次请求又压缩一遍，没完没了。所以只算系统提示词之后的部分：
+
+```java
+// 系统提示词是固定开销，压缩也无法缩小，不计入阈值，否则阈值较小时会在摘要后反复压缩。
+int size = conversationSize(micro);
+```
+
+这里用的是字符数，不是 token 数。中文大约一个字一个 token，英文和代码大约三四个字符一个 token，只是粗略估算。正式的实现应该用服务商返回的 usage 来计数。
+
+**总结失败怎么办？**
+
+总结请求也会失败：超时、返回空内容，甚至不听话返回工具调用。这时打印一行告警，继续用微压缩后的上下文发请求，历史一条不丢：
+
+```java
+} catch (IOException e) {
+    // 保存或总结失败不丢弃历史，继续用微压缩后的上下文请求。
+    print(output, "压缩> 失败（" + e.getClass().getSimpleName() + "），继续使用未总结的上下文");
+    return new Prepared(history, micro, false);
+}
+```
+
+还有一点：总结请求是程序自己的行为，不算模型的一步。所以它**不计入** `agent.max-model-calls`，不经过 S04 的 Hook，也不触发 Stop。
+
+**第三层：compact 工具**
+
+有时候模型比程序更清楚什么时候该收拾：一个阶段做完了，或者用户换了话题。所以再给它一个工具：
+
+```java
+return new ToolDefinition("compact",
+        "压缩当前对话：保存完整记录后把历史替换为摘要，释放上下文。适合长任务的阶段之间或切换话题时使用；"
+                + "focus 可说明摘要中必须保留的内容。压缩在本批工具结果返回后执行。",
+        JSON.parseObject("""
+                {"type":"object","properties":{
+                "focus":{"type":"string","description":"可选，摘要需特别保留的内容"}},
+                "additionalProperties":false}
+                """));
+```
+
+`focus` 会追加到总结提示词后面，比如"保留修改过的文件路径"。
+
+关键在于：**`compact` 执行时只登记，不马上压缩**。
+
+```java
+public String execute(String arguments) {
+    // ……校验参数只有可选的 focus
+    compactor.requestCompaction(text);
+    return "已安排压缩：下一次模型请求前保存完整记录，并把对话历史替换为摘要。";
+}
+```
+
+为什么不当场压缩？模型一次可能返回好几个工具调用，`compact` 后面还排着一个 `read_file`。如果执行 `compact` 时就把历史换掉，那条发起调用的 assistant 消息就没了，后面 `read_file` 的结果找不到对应的调用，协议就坏了。所以要等这一批结果全部补齐，到下一次请求前再执行，而且只生效一次：
+
+```text
+assistant → compact({"focus":"保留文件路径"}) + read_file(...)
+tool      → 已安排压缩……
+tool      → read_file 的结果
+（整批补齐，下一次请求前：存档 → 总结 → 替换）
+```
+
+`compact` 只是登记一个标记，所以权限直接放行；它照样经过 S04 的 Hook，用户想禁止模型压缩，可以用 PreToolUse 拦截：
+
+```java
+// S08：只登记压缩请求；完整记录写入工作目录的 .transcripts，不执行命令。
+case "compact" -> new Decision(Action.ALLOW, "只压缩会话上下文，完整记录保存到工作目录。");
+```
+
+**循环要改什么？**
+
+S05 到 S07 都没动 `ChatLoop`，这一课要动一处：请求模型之前，先交给压缩器整理。
+
+```java
+List<ChatMessage> sent = request;
+if (compactor != null) {
+    // S08：请求前整理上下文；总结后本轮之前的内容都在摘要里，本轮从摘要消息算起。
+    ContextCompactor.Prepared prepared = compactor.beforeRequest(List.copyOf(request), output);
+    if (prepared.summarized()) {
+        request = new ArrayList<>(prepared.history());
+        turnStart = request.size() - 1;
+        if (toolsRecorded) {
+            history = request;
+        }
+    }
+    sent = prepared.sent();
+}
+ChatMessage answer = client.complete(List.copyOf(sent), definitions);
+```
+
+压缩器为 `null` 时，`sent` 就是 `request`，行为和 S07 完全一样。
+
+压缩可能发生在一轮的中途，比如模型连续读了几个大文件，第三次请求前超了阈值。这时摘要消息就成为本轮新的起点：之后的工具调用照常追加，S04 的 Stop 只收到摘要之后的消息。
+
+子代理不做压缩，也没有 `compact`。它的历史每次 `task` 新建，结束就扔，本来就不会越积越长。
+
+**压缩的代价**
+
+- **摘要一定会丢细节**。模型可能漏掉用户提过的某个约束。完整记录能找回原文，但要靠模型想起来去读。
+- **记录里什么都有**。`.transcripts/` 存的是原始对话和工具输出，可能包含敏感内容，不会自动清理。仓库的 `.gitignore` 已经忽略了它，别手动提交。
+- **单条消息太长不管**。一次工具结果本身就超过上下文窗口，微压缩救不了，还得靠各个工具自己的输出上限。
+
+想很快看到效果，可以在 `config.properties` 里临时设 `compact.threshold-chars=3000`，让模型连续读几个文件，终端会打印 `压缩> 微压缩` 和 `压缩> 完成`。
+
+Context Compact 的定位是"用摘要换空间，用存档兜底"。微压缩成本几乎为零，总结代价高但效果大，存档保证压掉的东西还能找回来。压缩后的上下文是一次性的，程序重启就没了；跨会话记住用户和项目，是下一课 Memory 的事。

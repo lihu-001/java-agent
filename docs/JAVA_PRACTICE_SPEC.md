@@ -1,6 +1,6 @@
 # Java Agent 实战规范
 
-当前采用七个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading。
+当前采用八个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact。
 
 ## 模块边界
 
@@ -13,6 +13,7 @@
 | s05 | dev.learnagent.s05 / TodoMain | todo_write 会话内任务清单与未更新提醒 |
 | s06 | dev.learnagent.s06 / SubagentMain | task 子代理，独立消息历史，只回传总结 |
 | s07 | dev.learnagent.s07 / SkillMain | 技能目录与 load_skill 按需加载 |
+| s08 | dev.learnagent.s08 / CompactMain | 微压缩、阈值自动总结、compact 工具与完整记录 |
 
 每课是前一课的源码快照加增量修改，拥有独立源码、测试、POM、配置示例、README。各模块不依赖其他课的 JAR 或源码，不使用共用 Java 核心。根 POM 为 packaging=pom，只聚合各课、管理依赖和插件版本。
 
@@ -37,6 +38,8 @@ S05 以 S04 完整源码为起点，新增 todo.TodoStatus、TodoItem、TodoList
 S06 以 S05 完整源码为起点，新增 subagent.SubagentRunner、TaskTool 和根包 SubagentMain；S05 的 TodoMain 移入 app，ChatLoop 不修改。task 参数为 description（去空白后非空，≤40 字符）与 prompt（≤8000 字符），未知字段拒绝。SubagentRunner 每次新建历史，只含子代理系统提示词与 prompt，不复制主历史；执行工具直到无工具调用的最终回复，返回去空白后的文字，结束即丢弃历史。子代理每次 task 最多请求 agent.max-model-calls 次，达到上限时最后一批不执行，返回未完成说明。结果超过 12000 字符截断；模型请求超时或失败转为工具错误，不回滚已执行操作。子代理只有五个基础工具，无 task（禁止递归）和 todo_write（不改主清单），与主代理共用同一 PermissionGate 和 AgentHooks：task 直接允许，子代理的写入、编辑、Shell 仍逐次确认；PreToolUse/PostToolUse 两层都触发，Hook 拦截 task 时子代理不启动；UserPromptSubmit、Stop 和清单提醒只属于主循环。Hook 配置固定为 `s06/.agents/hook.json`，默认空。详见 [S06 课程](lessons/s06-subagent.md)。
 
 S07 以 S06 完整源码为起点，新增 skill.SkillFile、Skill、SkillCatalog、LoadSkillTool 和根包 SkillMain；S06 的 SubagentMain 移入 app，ChatLoop 不修改。技能固定从 `s07/.agents/skills/<name>/SKILL.md` 扫描，与启动目录无关。frontmatter 只解析单行 key: value（可加引号、# 注释、未知字段忽略、重复字段拒绝），不是完整 YAML；name 为小写字母数字与连字符、≤64 字符且与目录名一致，description 非空 ≤1024 字符，正文非空，文件 ≤64 KiB 严格 UTF-8，链接越出技能目录拒绝。最多 32 个，按目录名排序；单个无效时告警跳过，目录不存在视为无技能，目录不可读阻止启动。系统提示词只追加技能目录（名称与描述）及使用规则，无技能时与 S06 相同。load_skill 参数仅 name，返回 `<skill name="...">正文</skill>`，超过 12000 字符截断；每次重新读文件，正文修改即时生效，增删技能或改名需重启。未知名称为工具错误并列出可用技能。PermissionPolicy 直接允许，仍经过 PreToolUse/PostToolUse。子代理系统提示词同样附带目录并拥有 load_skill，仍无 task 与 todo_write。技能文本不授予权限、不做信任授权。Hook 配置固定为 `s07/.agents/hook.json`，默认空。详见 [S07 课程](lessons/s07-skill-loading.md)。
+
+S08 以 S07 完整源码为起点，新增 compact.MicroCompact、TranscriptStore、ContextCompactor、CompactTool 和根包 CompactMain；S07 的 SkillMain 移入 app。ChatLoop 增加可选 ContextCompactor 构造参数，为 null 时与 S07 相同；每次请求模型前调用。微压缩保留最近 `compact.keep-tool-results`（默认 3）个工具结果原文，更早且超过 200 字符的替换为占位说明，task、load_skill、todo_write、compact 结果不替换；只作用于发送内容，内存历史保留原文。微压缩后对话（不含系统提示词）的粗略字符数超过 `compact.threshold-chars`（默认 50000），或上一批工具中有 compact 登记时：先把内存历史写成工作目录 `.transcripts/transcript-时间.jsonl`（只新建文件，写入失败则不总结），再用独立提示词、不带工具请求总结（输入最多 60000 字符，保留最近部分；摘要最多 8000 字符），历史替换为原系统提示词加一条以 `[对话已压缩]` 开头的 user 消息，其中附记录路径、摘要、程序保存的任务清单原文和最近一条真实用户输入原文。总结请求不计入每轮调用上限、不经过 Hook；失败、空回复或返回工具调用时告警并继续使用未总结的上下文。compact 参数只有可选 focus（≤200 字符），执行时只登记，本批结果补齐后的下一次请求前生效且只生效一次；PermissionPolicy 直接允许，仍经过 PreToolUse/PostToolUse。中途压缩后摘要消息成为本轮起点。子代理不压缩，也没有 compact。字符数不是 token 计数；记录可能含敏感内容，不自动清理，根 `.gitignore` 忽略 `.transcripts/`。Hook 配置固定为 `s08/.agents/hook.json`，技能目录为 `s08/.agents/skills`。详见 [S08 课程](lessons/s08-context-compact.md)。
 
 保留前一课的组装类便于代码对照；启动应使用各模块 POM 的默认入口。例如 s04 默认 HooksMain，直接手动运行保留的 app.ToolUseMain 不会启用权限和 Hook。
 
@@ -71,7 +74,7 @@ Shell 危险命令只作为待分类字符串；真实执行用无副作用命�
 
 ## 后续课程
 
-S08 Context Compact、S09 Memory、S10 Task System、S11 Background Tasks、S12 Cron Scheduler、S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
+S09 Memory、S10 Task System、S11 Background Tasks、S12 Cron Scheduler、S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
 
 ## 模块拆分验证
 
@@ -140,3 +143,9 @@ S08 Context Compact、S09 Memory、S10 Task System、S11 Background Tasks、S12 
 2026-10-21，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S06 为 s07 并重命名包，新增 skill 包与 SkillMain，父 POM 聚合 s07。根目录 `.\mvnw.cmd -B package` 七模块全部成功：共 1472 项测试，1465 通过、7 项跳过，无失败或错误。S01—S06 测试未改动；S07 共 329 项、327 通过、2 跳过（原有的 Windows 符号链接权限测试，以及新增的技能链接越界测试），新增 22 项（另在权限策略测试中补充 load_skill 断言）覆盖 frontmatter 解析与错误格式、目录缺失、排序与只渲染元数据、无效技能跳过、数量上限、正文每次重读与改名报错、示例技能有效、load_skill 参数校验与截断、系统提示词只含目录而正文作为工具结果、免确认但经过 Hook、Hook 拦截、子代理可加载技能且仍无 task、无技能时提示词与 S06 相同。
 
 根目录 `-pl s07 exec:java` 以空输入（EOF）启动并退出，显示八个工具和两个示例技能，读取 `s07/.agents/skills` 与 `s07/.agents/hook.json`；未请求模型。S01—S06 源码未修改。模型是否在合适时机主动加载技能需真实服务单独验收；符号链接越界拒绝在本机因权限跳过，未实际验证。
+
+## S08 Context Compact 验证
+
+2026-10-21，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S07 为 s08 并重命名包，新增 compact 包与 CompactMain，父 POM 聚合 s08。根目录 `.\mvnw.cmd -B package` 八模块全部成功：共 1824 项测试，1815 通过、9 项跳过，无失败或错误。S01—S07 源码与测试未改动，沿用上次的 1472 项；S08 共 352 项、350 通过、2 跳过（与 S07 相同的两项符号链接测试），新增 23 项（另在配置和权限策略测试中补充压缩配置与 compact 断言）覆盖微压缩替换范围与豁免工具、发送内容与内存历史分离、阈值总结与完整 JSONL 记录、摘要附加任务清单与最新用户输入、compact 登记与 focus、参数校验、总结失败/返回工具调用/记录无法保存时保留历史、无可总结内容跳过、重复压缩、一轮中途压缩后协议合法且下一轮基于摘要、总结请求不计入调用上限、compact 免确认经过 Hook 且可被拦截。
+
+根目录 `-pl s08 exec:java` 以空输入（EOF）启动并退出，显示九个工具、两个示例技能、完整记录目录与 `s08/.agents/hook.json`；未请求模型。摘要质量及压缩后模型能否继续任务需真实服务单独验收。
