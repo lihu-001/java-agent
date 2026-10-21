@@ -48,6 +48,12 @@ class SingleToolLoopTest {
                 requests.get(2).stream().map(ChatMessage::role).toList());
         assertTrue(output.toString().contains("工具请求> shell [call-1]"));
         assertTrue(output.toString().contains("工具结果> [call-2]"));
+        String log = output.toString();
+        assertTrue(log.contains("模型请求> 第 1 次请求中..."));
+        assertTrue(log.contains("模型请求> 第 2 次请求中..."));
+        assertTrue(log.matches("(?s).*模型响应> 耗时 \\d+ ms，工具调用 2 个.*"));
+        assertTrue(log.indexOf("模型请求> 第 1 次") < log.indexOf("模型响应>"));
+        assertTrue(log.indexOf("模型响应>") < log.indexOf("工具请求> shell [call-1]"));
     }
 
     @Test

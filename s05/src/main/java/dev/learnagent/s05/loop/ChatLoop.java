@@ -102,7 +102,15 @@ public final class ChatLoop {
                     reminder.startTurn();
                 }
                 for (int step = 1; step <= maxModelCalls; step++) {
+                    // 非流式请求在完整响应前没有输出，先提示等待并在返回后报告耗时。
+                    output.println("模型请求> 第 " + step + " 次请求中...");
+                    output.flush();
+                    long startNanos = System.nanoTime();
                     ChatMessage answer = client.complete(List.copyOf(request), definitions);
+                    long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000;
+                    output.println("模型响应> 耗时 " + elapsedMillis + " ms，工具调用 "
+                            + answer.toolCalls().size() + " 个");
+                    output.flush();
                     request.add(answer);
                     if (StrUtil.isNotBlank(answer.content())) {
                         output.println("助手> " + answer.content());
