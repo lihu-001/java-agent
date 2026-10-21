@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-八个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
+九个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
 
 - `s01`：最小文本对话，无工具；入口 `dev.learnagent.s01.AgentLoopMain`。
 - `s02`：基于 S01 增加单工具、多工具分派、Shell 和文件工具；入口 `dev.learnagent.s02.ToolUseMain`。
@@ -12,6 +12,7 @@
 - `s06`：基于 S05 增加 Subagent 子代理；入口 `dev.learnagent.s06.SubagentMain`。
 - `s07`：基于 S06 增加 Skill Loading 技能加载；入口 `dev.learnagent.s07.SkillMain`。
 - `s08`：基于 S07 增加 Context Compact 上下文压缩；入口 `dev.learnagent.s08.CompactMain`。
+- `s09`：基于 S08 增加 Memory 跨会话记忆；入口 `dev.learnagent.s09.MemoryMain`。
 
 每课有完整源码、测试、POM、配置示例与 README；类全部在本模块的 `dev.learnagent.s0N` 包及其子包。后续课复制前一课阶段源码后修改扩展，不通过跨模块 Java 依赖或 common 工程隐藏实现。用户已明确用教学快照替代旧版“共用一份循环、不复制”的要求。
 
@@ -30,6 +31,8 @@ S06 根包只保留 `SubagentMain`，`TodoMain` 移入 `app`；新增 `s06.subag
 S07 根包只保留 `SkillMain`，`SubagentMain` 移入 `app`；新增 `s07.skill`：`SkillFile`、`Skill`、`SkillCatalog`、`LoadSkillTool`。技能固定从 `s07/.agents/skills/<name>/SKILL.md` 扫描，name 与目录名一致；系统提示词只放名称和描述，正文由 `load_skill` 按需读取、每次重读。无效技能告警跳过不阻止启动，无技能时提示词与 S06 相同。`load_skill` 免权限确认但经过 Hook；子代理也有 `load_skill`，仍无 `task`/`todo_write`；`ChatLoop` 不修改。Hook 配置固定为 `s07/.agents/hook.json`。
 
 S08 根包只保留 `CompactMain`，`SkillMain` 移入 `app`；新增 `s08.compact`：`MicroCompact`、`TranscriptStore`、`ContextCompactor`、`CompactTool`。`ChatLoop` 仅增加可选压缩器，为 null 时与 S07 相同。微压缩只改发送内容；超过阈值或 `compact` 登记时先写工作目录 `.transcripts/` 完整记录，写入失败不总结；摘要后保留原系统提示词、任务清单原文与最新用户输入原文。总结请求不计调用上限、不经过 Hook，失败保留历史。`compact` 免权限确认但经过 Hook，本批结果补齐后才执行；子代理不压缩。Hook 配置固定为 `s08/.agents/hook.json`。
+
+S09 根包只保留 `MemoryMain`，`CompactMain` 移入 `app`；新增 `s09.memory`：`MemoryType`、`MemoryEntry`、`MemoryStore`、`MemoryReadTool`、`MemoryWriteTool`、`MemoryDeleteTool`。记忆为工作目录 `.memory/<name>.md`，文件是唯一数据源；启动时索引（名称、类型、描述）进系统提示词，本次写入下次启动生效，正文由 `memory_read` 每次重读。`memory_read` 免确认，`memory_write`/`memory_delete` 逐次确认，均经过 Hook；子代理无记忆工具；`ChatLoop` 不修改。Hook 配置固定为 `s09/.agents/hook.json`。
 
 ## 构建与测试
 

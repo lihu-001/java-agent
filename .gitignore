@@ -8,3 +8,4 @@ config.properties
 *.pem
 *.key
 .transcripts/
+.memory/
