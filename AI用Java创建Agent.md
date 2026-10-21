@@ -640,3 +640,150 @@ UserPromptSubmit 和 Stop 只属于主循环，子代理不触发：子代理的
 - 结果超过 12000 字符会截断，避免一个子代理的总结又把主上下文撑满。
 
 Subagent 的定位是"用一次性的上下文换取主对话的干净"。代价是子代理不知道主对话的背景，主代理必须把任务交代清楚，`prompt` 写得好不好，直接决定子代理干得好不好。
+
+
+
+# S07、Skill Loading 技能加载
+
+S06 让主对话不再被探索过程撑满。还有一类内容也在占上下文：**做事的规范**。比如"代码审查要按三级列问题""发布说明要用固定结构"。这些规范写进系统提示词当然可以，但规范越来越多，每次请求都要把它们全部发一遍，而大部分请求根本用不上。
+
+解决办法是分两层：系统提示词里只放一份"目录"，写清有哪些技能、各自干什么；完整说明留在磁盘上，模型觉得用得上时再去读。这就是 Skill Loading。
+
+整个过程是这样的：
+
+1、**程序启动时收集目录**。扫描技能文件夹，把每个技能的名称和描述收集起来，拼到系统提示词末尾。正文这时不读进来。
+
+2、**大模型自己判断要不要用**。模型看到用户的问题和目录，自己决定是否需要某个技能。程序不做关键词匹配。
+
+3、**需要时读取正文**。模型调用 `load_skill` 工具，程序读出技能的完整说明，作为工具结果返回给模型，模型再按说明干活。
+
+所以它本质上还是一个工具，和 S05、S06 一样。
+
+核心流程如下：
+
+```text
+启动：扫描 .agents/skills/*/SKILL.md → 只取 name + description → 拼进系统提示词
+
+系统提示词：……可用技能：
+- code-review：审查工作目录中的代码或文本文件……
+- release-notes：根据改动说明撰写中文发布说明……
+
+第 1 次请求 → assistant: load_skill({"name":"code-review"})
+程序执行   → tool: <skill name="code-review"> 完整步骤 </skill>
+第 2 次请求 → assistant: 按步骤调用 glob、read_file……
+```
+
+**技能长什么样？**
+
+每个技能一个文件夹，里面一个 `SKILL.md`：
+
+```markdown
+---
+name: code-review
+description: 审查工作目录中的代码或文本文件，按严重程度列出问题与修改建议。用户要求“审查”“review”“检查代码”时使用。
+---
+
+# 代码审查
+
+1. 用 glob 找出用户指定范围内的文件……
+2. 逐个用 read_file 读取，不修改任何文件。
+3. 按“严重 / 一般 / 建议”三级列出问题……
+```
+
+两条 `---` 之间是元数据，下面是正文。`description` 最重要：模型只凭这一句话判断要不要加载，所以要写清"做什么"和"什么时候用"。
+
+核心实现如下：
+
+1、启动时扫描目录，只保存元数据
+
+```java
+/** 启动时只保存技能元数据；正文在 load_skill 调用时才从 file 读取。 */
+public record Skill(String name, String description, Path file) {
+}
+```
+
+```java
+for (Path entry : candidates) {
+    try {
+        Skill skill = load(root, entry);    // 解析 frontmatter，校验 name、description
+        skills.put(skill.name(), skill);
+    } catch (IllegalArgumentException | IOException e) {
+        warnings.accept("技能> 跳过 " + folder + "：" + message(e));
+    }
+}
+```
+
+某个技能写错了，比如 `name` 和文件夹名不一致，只打印告警跳过它，不影响其他技能，也不阻止程序启动。
+
+2、生成目录，拼进系统提示词
+
+```java
+public String renderCatalog() {
+    StringBuilder text = new StringBuilder("可用技能（只列出名称和用途；需要时调用 load_skill 读取完整说明，再按说明执行）：");
+    for (Skill skill : skills.values()) {
+        text.append("\n- ").append(skill.name()).append("：").append(skill.description());
+    }
+    return text.toString();
+}
+```
+
+```java
+public static String systemPrompt(String base, SkillCatalog catalog) {
+    String rendered = catalog.renderCatalog();
+    return rendered.isEmpty() ? base : base + SKILL_RULE + "\n\n" + rendered;
+}
+```
+
+注意这里只有名称和描述，**没有正文**。没有任何技能时，系统提示词和 S06 完全一样。
+
+3、`load_skill` 工具，按名称读取正文
+
+```java
+public String execute(String arguments) throws IOException {
+    // ……校验参数只有 name
+    Skill skill = catalog.find(name).orElseThrow(() -> new IllegalArgumentException(
+            "未知技能 " + name + "，可用技能：" + ……));
+    String body = catalog.body(skill);   // 每次重新读文件
+    // ……超过 12000 字符截断
+    return "<skill name=\"" + skill.name() + "\">\n" + body + suffix + "\n</skill>";
+}
+```
+
+模型写错了名字，拿到的是工具错误，里面列出所有可用技能，模型可以改正后重试。
+
+正文每次都重新读文件，所以改技能的步骤不用重启；新增、删除技能或修改描述要重启，因为目录在启动时就写进系统提示词了。
+
+4、注册为第八个工具
+
+```java
+// 子代理在五个基础工具外也能加载技能；仍没有 task 与 todo_write。
+ToolRegistry childTools = ToolUseMain.createTools(config, gate, hooks, List.of(new LoadSkillTool(catalog)));
+SubagentRunner runner = new SubagentRunner(client, childTools, config.maxModelCalls(),
+        systemPrompt(SubagentMain.SUBAGENT_PROMPT, catalog), output);
+ToolRegistry tools = ToolUseMain.createTools(config, gate, hooks,
+        List.of(new TodoWriteTool(todos), new TaskTool(runner), new LoadSkillTool(catalog)));
+```
+
+子代理的系统提示词也附带目录，也有 `load_skill`。子代理加载的正文只留在子代理的历史里，主代理只看到总结，这正好和 S06 配合起来。
+
+`load_skill` 只读技能文件夹里的说明文本，所以权限直接放行；它仍然经过 S04 的 Hook，用户可以用 matcher `load_skill` 拦截或记录：
+
+```java
+// S07：只读取技能目录中的说明文本，不接触工作目录或进程。
+case "load_skill" -> new Decision(Action.ALLOW, "只读取技能目录中的说明文本。");
+```
+
+**技能会被"执行"吗？**
+
+不会。技能只是一段写给模型看的说明，程序把它当普通文本返回。模型读完后，还是用原来的工具干活。技能里写着"用 write_file 写入"，写入时照样要用户确认。技能没法给模型额外的权限。
+
+但技能会影响模型的行为，来源不明的技能和来源不明的提示词风险一样。本课没有给技能加类似 S04 HookTrust 的授权确认，只放自己写的技能。
+
+**加载技能有代价吗？**
+
+有两点：
+
+- 读取正文本身就是一次工具调用，模型要多请求一次才能看到正文，会占用 `agent.max-model-calls` 的一次额度。
+- 正文加载后就留在对话历史里，之后每一轮都会随请求发送。按需加载省掉的是"用不上的技能"，用上的技能照样占上下文。
+
+Skill Loading 的定位是"用一次工具调用，换系统提示词的精简"。目录要短，描述要准，模型才能在该用的时候想起它。对话越来越长、历史越来越大的问题，下一课 Context Compact 再解决。
