@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-十个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
+十一个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
 
 - `s01`：最小文本对话，无工具；入口 `dev.learnagent.s01.AgentLoopMain`。
 - `s02`：基于 S01 增加单工具、多工具分派、Shell 和文件工具；入口 `dev.learnagent.s02.ToolUseMain`。
@@ -14,6 +14,7 @@
 - `s08`：基于 S07 增加 Context Compact 上下文压缩；入口 `dev.learnagent.s08.CompactMain`。
 - `s09`：基于 S08 增加 Memory 跨会话记忆；入口 `dev.learnagent.s09.MemoryMain`。
 - `s10`：基于 S09 增加 Task System 持久化任务；入口 `dev.learnagent.s10.TaskMain`。
+- `s11`：基于 S10 增加 Background Tasks 后台任务；入口 `dev.learnagent.s11.BackgroundMain`。
 
 每课有完整源码、测试、POM、配置示例与 README；类全部在本模块的 `dev.learnagent.s0N` 包及其子包。后续课复制前一课阶段源码后修改扩展，不通过跨模块 Java 依赖或 common 工程隐藏实现。用户已明确用教学快照替代旧版“共用一份循环、不复制”的要求。
 
@@ -36,6 +37,8 @@ S08 根包只保留 `CompactMain`，`SkillMain` 移入 `app`；新增 `s08.compa
 S09 根包只保留 `MemoryMain`，`CompactMain` 移入 `app`；新增 `s09.memory`：`MemoryType`、`MemoryEntry`、`MemoryStore`、`MemoryReadTool`、`MemoryWriteTool`、`MemoryDeleteTool`。记忆为工作目录 `.memory/<name>.md`，文件是唯一数据源；启动时索引（名称、类型、描述）进系统提示词，本次写入下次启动生效，正文由 `memory_read` 每次重读。`memory_read` 免确认，`memory_write`/`memory_delete` 逐次确认，均经过 Hook；子代理无记忆工具；`ChatLoop` 不修改。Hook 配置固定为 `s09/.agents/hook.json`。
 
 S10 根包只保留 `TaskMain`，`MemoryMain` 移入 `app`；新增 `s10.task`：`TaskStatus`、`TaskRecord`、`TaskStore`、`TaskTools`。任务为工作目录 `.tasks/task_xxxxxxxx.json`，文件是唯一数据源，每次调用重读；`blockedBy` 依赖校验存在、非自身、无环，全部完成才能 claim，只有 owner 能 complete，owner 由程序固定为 `agent`。任务内容不进系统提示词，只附规则，用 `task_list` 恢复。六个 `task_*` 工具免确认但经过 Hook；子代理无任务工具；`ChatLoop` 不修改。Hook 配置固定为 `s10/.agents/hook.json`。
+
+S11 根包只保留 `BackgroundMain`，`TaskMain` 移入 `app`；新增 `s11.background`：`BackgroundStatus`、`BackgroundTask`、`BackgroundManager`、`BackgroundTools`。`background_run` 在守护线程用独立 ShellTool（`background.timeout-seconds`，默认 600）执行并立即返回 `bg_N`，同时最多 4 个、每会话 20 个；完成通知进线程安全队列，`ChatLoop` 每次请求模型前取出，附加到最后一条 user/tool 消息末尾，不新增角色，只送达一次，首次请求失败放回。`ChatLoop` 仅增加可选 BackgroundManager，为 null 时与 S10 相同；会话结束取消运行中的命令。`background_run` 与 shell 同规则逐次确认，`background_check` 免确认，均经过 Hook；子代理无后台工具。Hook 配置固定为 `s11/.agents/hook.json`。
 
 ## 构建与测试
 

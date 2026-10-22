@@ -1635,3 +1635,262 @@ case "task_create", "task_update", "task_list", "task_get", "task_claim", "task_
 想看效果：让模型"把实现用户注册拆成建表、接口、测试三个任务，按依赖推进"，观察它先并行 `task_create`，再 `task_update` 连依赖。做完一个就退出，重启后说"继续"，看它是否先 `task_list` 再接着干。也可以故意让测试依赖接口、接口又依赖测试，看程序怎么拒绝。
 
 Task System 让 Agent 第一次有了跨会话接着干的"工作账本"。S05 管一次会话里的步骤，S09 管会话之间要记住的事实，S10 管要交付的任务和它们的先后顺序。后面的后台任务、定时调度和多 Agent 协作，都要在这张任务图上展开。
+
+
+
+# S11、Background Tasks 后台任务
+
+S02 起的 `shell` 是同步的：模型发出命令，循环就卡在那里等结果，最多等 `shell.timeout-seconds`（默认 30 秒）。短命令没问题，可一旦要 `mvn package`、`npm install`、跑一遍完整测试，要么超时被杀，要么把超时调大，然后整个 Agent 干等几分钟，什么也做不了。
+
+人也一样。把衣服放进洗衣机，不会站在旁边盯着滚筒转；按下开始，去做别的事，听到提示音再回来。S11 给 Agent 加上这个能力：**启动**和**取结果**分开。
+
+```text
+模型 ──background_run──→ 立即返回 bg_1 ──→ 继续读代码、改文件……
+                          │
+                   后台线程执行命令
+                          │ 完成
+                          ▼
+                    通知队列 ──下一次请求模型前──→ 附加到最新消息 <background-results>
+```
+
+| | `shell` | `background_run` |
+| --- | --- | --- |
+| 返回时机 | 命令结束后 | 立即，返回任务 ID |
+| 超时 | `shell.timeout-seconds`，默认 30 秒 | `background.timeout-seconds`，默认 600 秒 |
+| 结果送达 | 本次工具结果 | 完成后自动附加到之后的某次请求 |
+| 权限 | 硬拒绝 + 逐次确认 | 同 `shell`，启动时确认一次 |
+| 生命周期 | 单次调用 | 本次会话，退出时取消 |
+
+**后台任务只是一个"线程 + 队列"**
+
+没有新协议，也没有新消息角色。`BackgroundManager` 持有三样东西：一个后台专用的 `ShellTool`、一个守护线程池、一个线程安全的通知队列。
+
+1、启动：登记后立刻返回
+
+```java
+public synchronized BackgroundTask start(String command) {
+    // ……检查会话未结束、同时运行不超过 4 个、总数不超过 20 个
+    Entry entry = new Entry("bg_" + nextId++, command);
+    tasks.put(entry.id, entry);
+    entry.future = executor.submit(() -> run(entry));
+    return entry.snapshot();
+}
+```
+
+`executor.submit` 把命令交给线程池后马上返回，工具结果就是一行"已在后台启动 bg_1"，模型可以继续调用别的工具。线程池用缓存线程并设为守护线程：即使程序异常退出、没走到清理逻辑，后台线程也不会拖住 JVM。
+
+ID 在会话内递增，`bg_1`、`bg_2`……不做持久化，因为任务本来就不跨会话。
+
+2、执行：状态由 Shell 结果判定
+
+```java
+private void run(Entry entry) {
+    String result;
+    BackgroundStatus status;
+    try {
+        result = shell.execute(JSON.toJSONString(Map.of("command", entry.command)));
+        status = statusOf(result);
+    } catch (InterruptedException e) {
+        result = "已取消：会话结束或任务被中断，命令可能已部分执行。";
+        status = BackgroundStatus.CANCELLED;
+    } catch (IOException | RuntimeException e) {
+        result = "工具错误：后台命令启动或读取失败（" + e.getClass().getSimpleName() + "）。";
+        status = BackgroundStatus.FAILED;
+    }
+    finish(entry, status, result);
+}
+```
+
+`ShellTool` 返回的是文本，`statusOf` 从文本判断状态：
+
+```java
+static BackgroundStatus statusOf(String result) {
+    if (result.startsWith("退出码：0\n") || "退出码：0".equals(result)) {
+        return BackgroundStatus.COMPLETED;
+    }
+    return result.startsWith("工具错误：命令超时") ? BackgroundStatus.TIMED_OUT : BackgroundStatus.FAILED;
+}
+```
+
+解析字符串当然不如结构化结果稳，这是教学版的简化：不改动 `ShellTool`，用现有的返回格式判断。真要做得更严谨，应该让工具返回带退出码的对象，而不是让上层猜文本。
+
+3、完成：放入队列，同时在终端响一声
+
+```java
+private void finish(Entry entry, BackgroundStatus status, String result) {
+    synchronized (this) {
+        if (entry.status != BackgroundStatus.RUNNING) {
+            return;   // 已经被 shutdown 标记过，不重复通知。
+        }
+        entry.result = result;
+        entry.elapsedMillis = (System.nanoTime() - entry.started) / 1_000_000;
+        entry.status = status;
+        if (status == BackgroundStatus.CANCELLED) {
+            return;   // 用户已经离开，取消不需要通知。
+        }
+    }
+    notifications.add(notification(entry.snapshot()));
+    terminal.accept("后台> " + entry.id + " " + status.label() + "（" + entry.elapsedMillis
+            + " ms）：" + entry.command + "，下一次请求模型时通知。");
+}
+```
+
+"状态只能从 `RUNNING` 改一次"这个判断同时解决了两个竞态：命令恰好在 `shutdown` 时结束，或者 `shutdown` 先标记取消、线程随后才收尾，都只会留下一个最终状态，不会既通知完成又通知取消。
+
+**结果怎么回到模型？**
+
+后台线程不直接调用模型，也不往对话历史里写消息——它不知道主循环此刻进行到哪一步，并发修改历史会破坏协议。它只把通知放进 `ConcurrentLinkedDeque`，由主循环在安全的时机取走。
+
+`ChatLoop` 每次请求模型前，也就是一批工具结果已经补齐、协议完整的时候，取走队列里的全部通知：
+
+```java
+List<String> notices = background == null ? List.of() : background.takeNotifications();
+if (!notices.isEmpty()) {
+    int last = request.size() - 1;
+    ChatMessage message = request.get(last);
+    String content = message.content() + "\n\n" + BackgroundManager.render(notices);
+    request.set(last, "tool".equals(message.role())
+            ? ChatMessage.tool(message.toolCallId(), content)
+            : new ChatMessage(message.role(), content));
+    output.println("后台> 已将完成结果交给模型");
+}
+```
+
+通知长这样：
+
+```text
+<background-results>
+后台任务已结束：
+[bg_1] completed，耗时 1234 ms，命令：mvn -q package
+退出码：0
+BUILD SUCCESS
+</background-results>
+```
+
+**为什么附加到最后一条消息，而不是新增一条？**
+
+Chat Completions 的角色只有 system、user、assistant、tool。插一条新的 user 消息，等于替用户说话；插 system 消息，又会在历史中间打乱优先级；assistant 消息不能凭空出现。S05 的任务清单提醒、S08 的压缩记录路径都用了同一招：**把程序产生的说明附加到已有消息末尾**，协议顺序不变。
+
+最后一条消息只可能是两种情况：
+
+- 本轮用户刚输入的内容（模型还没调用工具，或上一批工具已经处理完）。
+- 本批最后一个工具结果（模型刚发起过工具调用）。
+
+tool 消息必须原样保留 `tool_call_id`，否则下一次请求会因为"工具调用没有对应结果"被服务端拒绝。上面的代码专门区分了两种角色。
+
+通知写进消息后就随历史保存，模型在后续轮次仍然看得到，但不会重复通知——队列里已经没有了。单条输出超过 2000 字符时，通知里截断并提示用 `background_check` 看全文。
+
+**空闲时完成，为什么不主动请求模型？**
+
+如果后台任务在用户思考、还没输入的时候完成，终端会先打印完成提示，通知则留在队列里，等用户下一次输入时附在那条输入后面。程序不会自己发起模型请求，原因有两个：
+
+1. 模型请求要花钱，结果可能只是"构建成功"，不值得为它单独开一轮。
+2. 没有用户的新问题，模型拿到结果也不知道该做什么，容易自作主张继续改代码。
+
+所以后台任务是"下次见面时告诉你"，不是"打电话叫醒你"。真需要定时主动执行，是 S12 的事。
+
+**第一次请求失败，通知不能丢**
+
+S01 起有个约定：本轮第一次请求模型就失败，丢弃整轮输入，让用户重试。可通知已经被附加到本轮的消息里了，消息一丢，结果就永远看不到了。
+
+解决办法是在附加时记一份：
+
+```java
+List<String> notices = background.takeNotifications();
+if (!notices.isEmpty()) {
+    if (!toolsRecorded) {
+        unsavedNotices.addAll(notices);   // 本轮还没保存过，失败时要还回去。
+    }
+    // ……附加到消息
+}
+```
+
+请求抛异常时：
+
+```java
+private void requeue(boolean toolsRecorded, List<String> unsavedNotices) {
+    if (!toolsRecorded && !unsavedNotices.isEmpty()) {
+        background.requeue(unsavedNotices);
+    }
+}
+```
+
+`requeue` 倒序 `addFirst`，把多条通知按原顺序放回队首。下一轮请求时会再次附加，只多等一轮，不会丢。
+
+如果工具已经执行过，历史就保存了，通知也跟着保存，不需要还回去——丢掉消息并不能撤销已经发生的文件修改或命令。
+
+**会话结束：取消，而不是放着不管**
+
+`ChatLoop.run` 用 `try/finally` 包住整个对话：
+
+```java
+public void run(BufferedReader input, PrintWriter output) throws IOException {
+    try {
+        converse(input, output);
+    } finally {
+        if (background != null) {
+            int cancelled = background.shutdown();
+            if (cancelled > 0) {
+                output.println("后台> 会话结束，已取消 " + cancelled + " 个仍在运行的后台任务。");
+            }
+        }
+    }
+}
+```
+
+exit、EOF、Ctrl+C 中断、异常退出，都会走到 `finally`。`shutdown` 做四件事：
+
+1. 标记 `closed`，之后 `background_run` 一律拒绝。
+2. 对每个运行中的 Future 调用 `cancel(true)`，中断线程；`ShellTool` 收到中断会终止进程树。
+3. `shutdownNow` 并最多等 5 秒。
+4. 把仍未结束的任务标记为 `cancelled`，**不产生通知**，返回数量给主循环打印。
+
+为什么不等它跑完？用户已经退出了，没人会看结果；继续跑可能在下一次启动前改动文件，留下说不清的状态。宁可让用户知道"命令被取消了、可能执行了一半"，也不要悄悄完成。
+
+后台任务只在内存中，这是有意的边界：跨会话继续执行要处理进程重启、日志落盘、结果归属，属于 S12 定时调度的范围。
+
+**权限和 Hook 怎么衔接？**
+
+`background_run` 和 `shell` 共用同一套判断：
+
+```java
+case "background_run" -> shellDecision(requiredString(args, "command"));
+case "background_check" -> new Decision(Action.ALLOW, "只查看本次会话后台任务的状态和输出。");
+```
+
+硬拒绝（`shutdown`、`sudo` 这类）直接拦下，其他命令在**启动时**逐次确认一次。确认不能放到后台线程里做：那时主循环已经返回，没人读终端输入。
+
+Hook 也一样，PreToolUse / PostToolUse 只包围"启动"这个动作。`background_run` 的 PostToolUse 看到的结果是"已启动"，命令真正结束时不会再触发一次 Hook——否则一个后台命令会在任意时刻打断主循环去执行用户配置的脚本。要记录命令的真实结束，得在 `BackgroundManager.finish` 里另做扩展。
+
+`background_check` 直接允许，因为它只读本会话内存中的任务状态和输出，不执行任何东西，也不写文件。
+
+**为什么子代理没有后台工具？**
+
+子代理的生命周期是"派发 → 执行 → 返回总结 → 丢弃"。它启动的后台命令结束时，子代理可能已经不存在了，通知没有接收者。主代理可以自己后台跑构建，或者把一件完整的子任务派给子代理同步做完。
+
+**和其他机制的关系**
+
+| 机制 | 行为 |
+| --- | --- |
+| S03 权限 | `background_run` 与 `shell` 共用硬拒绝，其余逐次确认；确认只在启动时 |
+| S04 Hook | 两个工具都触发 Pre/PostToolUse；命令真正结束不触发 Hook |
+| S05 TodoWrite | 后台跑长任务期间，用 `todo_write` 更新手上的步骤 |
+| S06 子代理 | 没有后台工具 |
+| S08 压缩 | 通知随消息进入历史，可能被微压缩或总结；完整结果仍可 `background_check` |
+| S09 记忆 | 与后台任务无直接关系；长期事实仍由记忆保存 |
+| S10 任务图 | 认领任务 → 后台跑构建 → 收到通知 → `task_complete` |
+
+`ChatLoop` 这一课只改了两处，且 `background` 为 null 时与 S10 完全相同：请求前附加通知，`run` 结束时取消任务。
+
+**后台任务的局限**
+
+- **只在内存里**。退出即取消，不能跨会话继续，也不能在 Agent 退出后继续跑。定时执行见 S12。
+- **不会唤醒模型**。空闲时完成只是终端提示，结果等下一次用户输入才交给模型。
+- **不能单独取消**。启动后只能等超时或退出会话；没有 `background_cancel` 工具。
+- **状态靠文本推断**。`statusOf` 匹配 `ShellTool` 的中文返回格式，改返回文案就会失效；生产实现应返回结构化结果。
+- **不是沙箱**。取消通过中断线程并终止可枚举的子进程树完成，脱离进程树的子进程可能残留，和 `shell` 一样。
+- **终端会穿插**。后台提示可能打印在 `你> ` 提示符之后，看起来有点乱，但不影响输入。
+
+想看效果：让模型"在后台运行 `Start-Sleep 20; Write-Output 构建完成`，同时读一下 example.txt"，确认后观察 `background_run` 立即返回 `bg_1`，模型继续读文件；约 20 秒后终端出现 `后台> bg_1 completed`，下一次请求时模型收到 `<background-results>`。也可以把 `background.timeout-seconds` 改成 5，后台跑 `Start-Sleep 20`，看它变成 `timed_out`。最后启动一个长命令后立刻 exit，确认终端提示已取消，命令的副作用没有发生。
+
+后台任务让 Agent 从"一次只做一件事"变成"先开工，回头再收结果"。它把等待从主循环里拿掉，但没有解决"什么时候该主动开工"——定时、周期性的执行，要等 S12 的调度器。
