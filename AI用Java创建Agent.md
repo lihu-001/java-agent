@@ -1316,3 +1316,322 @@ case "memory_delete" -> new Decision(Action.ASK, "将永久删除一条跨会话
 想看效果：告诉模型"以后回答都附上文件路径"，确认保存，退出再启动，终端会显示 `记忆> 已加载索引 1 条`。也可以直接打开 `.memory/` 下的文件改一改描述，重启看索引的变化。
 
 Memory 的定位是"少而精的跨会话笔记"。S08 的压缩管的是一次会话之内的空间，S09 的记忆管的是会话之间的连续性。记忆存得越少越准，模型越能在该用的时候想起来。
+
+
+
+# S10、Task System 持久化任务
+
+S05 的 `todo_write` 让模型给自己列步骤清单，S09 的记忆让 Agent 跨会话记住用户的偏好。但碰到稍大一点的活，还缺一样东西。
+
+比如"实现用户注册"，拆下来是三件事：建表、写接口、写测试。它们之间有先后：表没建好，接口没法写；接口没定，测试没法写。而且这活一次会话未必干得完，今天做完建表，明天接着来。
+
+`todo_write` 回答不了这两个问题：
+
+- **这个任务现在能不能开始？** 清单里每项只有内容和状态，看不出谁依赖谁。
+- **上次做到哪了？** 清单只在内存里，程序一退出就没了。
+
+S10 把任务搬到磁盘上，每个任务一条记录，带上前置依赖和认领者。
+
+| | S05 TodoWrite | S10 Task System |
+| --- | --- | --- |
+| 存在哪 | 会话内存 | `.tasks/task_xxxxxxxx.json` |
+| 依赖 | 无 | `blockedBy` 依赖图 |
+| 活多久 | 本次会话 | 跨会话 |
+| 认领 | 无 | `owner`，claim / complete |
+| 怎么改 | 整表替换 | 一条一条地创建、读取、修改 |
+
+两者并不冲突：任务图记"要交付什么、先后顺序"，`todo_write` 记"手上这个任务我正在走哪一步"。
+
+那为什么不干脆全用任务系统？三步小活用任务系统，要 3 次 create、3 次 claim、3 次 complete，一次 `todo_write` 就能搞定；而且任务没有删除功能，碎步骤会永久留在 `.tasks/`，下次 `task_list` 全是上次的零碎，真正要交付的任务反而被淹没。所以系统提示词里写明分工：几步就能做完、不用下次接着做的，只用 `todo_write`；有依赖或要跨会话的，才建任务。
+
+（真实的 Claude Code 选的是另一条路：2.1.19 起用任务系统替换了 TodoWrite，并允许删除任务。本课保留两者，一是延续 S05 的能力，二是没有删除功能时分工更清楚。）
+
+整个过程是这样的：
+
+1、**先建节点**。模型用 `task_create` 把每个任务建出来，程序返回随机生成的 ID。
+
+2、**再连依赖**。拿到 ID 后，用 `task_update` 给任务加上 `blockedBy`：接口依赖建表，测试依赖接口。
+
+3、**认领、完成**。开始做之前 `task_claim`，依赖没完成就拒绝；做完了 `task_complete`，程序告诉模型哪些下游任务刚刚解锁。
+
+4、**下次接着来**。新会话里先 `task_list`，从文件里读出当前进度。
+
+**一个任务长什么样？**
+
+每个任务一个 JSON 文件，放在工作目录的 `.tasks/` 下：
+
+```json
+{
+  "id": "task_0a1b2c3d",
+  "subject": "创建 API 接口",
+  "description": "POST /users，校验邮箱",
+  "status": "pending",
+  "owner": null,
+  "blockedBy": ["task_9f8e7d6c"]
+}
+```
+
+和 S09 一样，**文件就是唯一的数据源**。没有数据库，也没有内存缓存，每次工具调用都重新读文件。好处还是那两条：人能直接看、直接改；不会出现内存和磁盘对不上。
+
+核心实现如下：
+
+1、状态和记录
+
+```java
+/** 持久化任务的三个状态：pending --claim--> in_progress --complete--> completed。 */
+public enum TaskStatus {
+    PENDING("pending", "[ ]"),
+    IN_PROGRESS("in_progress", "[>]"),
+    COMPLETED("completed", "[x]");
+    // ……
+}
+
+/** 一条持久化任务；blockedBy 是必须先完成的任务 ID，owner 是认领者，未认领时为 null。 */
+public record TaskRecord(String id, String subject, String description, TaskStatus status, String owner,
+                         List<String> blockedBy) {
+}
+```
+
+2、创建：随机 ID，排他写入
+
+```java
+byte[] random = new byte[4];
+for (int attempt = 0; attempt < 100; attempt++) {
+    RANDOM.nextBytes(random);
+    TaskRecord task = new TaskRecord("task_" + HexFormat.of().formatHex(random), cleanSubject,
+            cleanDescription, TaskStatus.PENDING, null, List.of());
+    try {
+        Files.writeString(fileOf(task.id()), toJson(task), StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+        return task;
+    } catch (FileAlreadyExistsException e) {
+        // 极少发生：换一个 ID 再试。
+    }
+}
+```
+
+为什么不用自增编号 1、2、3？自增要先读出当前最大值再加一，两次创建挨得近就可能撞号。随机 ID 配合 `CREATE_NEW`，文件已存在就抛异常换一个，不用先读再写。ID 格式固定为 `task_` 加 8 位小写十六进制，和 S09 的记忆名称一样先用正则校验，`../x` 这种跑不出 `.tasks` 目录。
+
+新任务一律是 `pending`、无人认领、没有依赖。
+
+**为什么要分两步建图？**
+
+直觉上，建任务时直接带上依赖更省事：`task_create("接口", blockedBy=[建表的 ID])`。问题是，模型经常在一条回复里**并行**发出好几个工具调用：
+
+```text
+assistant → task_create(建表)   task_create(接口)   task_create(测试)
+```
+
+这三个调用在任何结果返回之前就已经定下来了。建"接口"的时候，"建表"的 ID 还没生成，模型根本拿不到。所以分两批：
+
+```text
+第一批  task_create(建表) → task_aaaa   task_create(接口) → task_bbbb   task_create(测试) → task_cccc
+第二批  task_update(task_bbbb, addBlockedBy=[task_aaaa])
+        task_update(task_cccc, addBlockedBy=[task_bbbb])
+```
+
+这个约定写在工具描述和系统提示词里，模型照着做就行。
+
+3、加依赖：先整体校验，再保存
+
+```java
+public TaskRecord addDependencies(String id, List<String> dependencies) throws IOException {
+    TaskRecord task = load(id);
+    if (task.status() != TaskStatus.PENDING) {
+        throw new IllegalArgumentException("任务 " + id + " 已被认领或完成，只能在 pending 时修改依赖");
+    }
+    Set<String> merged = new LinkedHashSet<>(task.blockedBy());
+    for (String dependency : new LinkedHashSet<>(dependencies)) {
+        validateId(dependency);
+        if (dependency.equals(id)) {
+            throw new IllegalArgumentException("任务不能依赖自身");
+        }
+        load(dependency);   // 不存在就抛异常
+        if (!merged.contains(dependency) && dependsOn(dependency, id)) {
+            throw new IllegalArgumentException("依赖会形成环：" + dependency + " 已直接或间接依赖 " + id);
+        }
+        merged.add(dependency);
+    }
+    // ……检查数量上限
+    TaskRecord updated = task.withBlockedBy(List.copyOf(merged));
+    save(updated);
+    return updated;
+}
+```
+
+几个要点：
+
+- **整次校验**。一次加三个依赖，只要有一个不存在，三个都不加，不会留下改了一半的状态。
+- **去重**。用 `LinkedHashSet` 合并，重复添加不会出现两条一样的边，顺序也保留。
+- **防环**。如果 A 依赖 B，再让 B 依赖 A，两个任务就永远都开始不了。`dependsOn` 从新依赖出发顺着 `blockedBy` 往上找，找到当前任务就说明会成环：
+
+```java
+/** from 是否直接或间接依赖 target；缺失或无效的任务不再展开。 */
+private boolean dependsOn(String from, String target) throws IOException {
+    Deque<String> pending = new ArrayDeque<>(List.of(from));
+    Set<String> visited = new HashSet<>();
+    while (!pending.isEmpty()) {
+        String current = pending.pop();
+        if (current.equals(target)) {
+            return true;
+        }
+        if (!visited.add(current)) {
+            continue;
+        }
+        pending.addAll(load(current).blockedBy());   // 实际代码中缺失的任务跳过不展开
+    }
+    return false;
+}
+```
+
+`visited` 防止在菱形依赖里重复走同一个节点。
+
+- **认领之后不能改依赖**。人已经开始干了，再往前面插一个前置任务，就乱套了。
+
+保存和 S09 一样：先写临时文件，再整体替换。
+
+4、认领和完成
+
+```java
+/** pending → in_progress：依赖必须全部完成，记录认领者。 */
+public TaskRecord claim(String id, String owner) throws IOException {
+    TaskRecord task = load(id);
+    if (task.status() != TaskStatus.PENDING) {
+        throw new IllegalArgumentException("任务 " + id + " 状态为 " + task.status().wireName() + "，不能认领");
+    }
+    List<String> blocked = incompleteDependencies(task);
+    if (!blocked.isEmpty()) {
+        throw new IllegalArgumentException("任务 " + id + " 仍被未完成的任务阻塞：" + String.join("、", blocked));
+    }
+    TaskRecord updated = task.withStatus(TaskStatus.IN_PROGRESS, cleanOwner);
+    save(updated);
+    return updated;
+}
+```
+
+`incompleteDependencies` 把每个前置任务读一遍，不是 `completed` 的都算没完成。**前置任务的文件被删了或写坏了，也算没完成**。宁可卡住让人来看，也不能放行一个前提不确定的任务。
+
+```java
+/** in_progress → completed：只有认领者可以完成。 */
+public Completion complete(String id, String owner) throws IOException {
+    // ……检查状态为 in_progress、owner 一致
+    TaskRecord updated = task.withStatus(TaskStatus.COMPLETED, task.owner());
+    save(updated);
+    // 下游任务依赖 id，完成前一定不可开始；完成后依赖全部完成的就是刚刚解锁的。
+    List<TaskRecord> unblocked = new ArrayList<>();
+    for (TaskRecord candidate : list(warning -> { })) {
+        if (candidate.status() == TaskStatus.PENDING && candidate.blockedBy().contains(id)
+                && incompleteDependencies(candidate).isEmpty()) {
+            unblocked.add(candidate);
+        }
+    }
+    return new Completion(updated, unblocked);
+}
+```
+
+完成时顺便算出"刚刚解锁"的任务，写进工具结果：
+
+```text
+已完成 task_aaaa：建表
+已解锁：task_bbbb（接口）、task_dddd（文档）
+```
+
+模型不用再调一次 `task_list` 就知道下一步能做什么。如果"测试"同时依赖"建表"和"接口"，建表做完它仍然被接口卡着，不会出现在解锁列表里。
+
+整个状态机只有两个动作、三个状态：
+
+```text
+pending ──task_claim──→ in_progress ──task_complete──→ completed
+```
+
+5、六个工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `task_create` | 建任务，返回 ID |
+| `task_update` | 追加 `blockedBy` 依赖 |
+| `task_list` | 所有任务一行一个：状态、认领者、依赖、能不能开始 |
+| `task_get` | 一个任务的完整 JSON，包括 description |
+| `task_claim` | 认领 |
+| `task_complete` | 完成，报告解锁的下游 |
+
+`task_list` 的输出长这样：
+
+```text
+[x] task_aaaa：建表 [completed] 认领者=agent
+[>] task_bbbb：接口 [in_progress] 认领者=agent 依赖=task_aaaa
+[ ] task_cccc：测试 [pending] 依赖=task_bbbb 阻塞于=task_bbbb
+```
+
+pending 的任务会标上"可开始"或"阻塞于"哪些任务，模型一眼就能挑出下一个能做的。
+
+工具参数里**没有 owner**，认领者由程序在组装时固定传入：
+
+```java
+extra.addAll(TaskTools.create(tasks, TaskTools.DEFAULT_OWNER));   // "agent"
+```
+
+如果让模型自己填 owner，它就能以别人的名义完成别人认领的任务，"只有认领者能完成"这条规则就形同虚设。现在只有一个 Agent，看着多余；到 S13 多个队友协作时，每个队友用自己的 owner，这条约束才真正起作用。
+
+**任务为什么不放进系统提示词？**
+
+S09 的记忆索引是启动时放进系统提示词的，任务图却没有这么做。区别在于变化的频率：
+
+- 记忆很少变，一次会话里基本稳定。
+- 任务状态一直在变：认领一个、完成一个，刚写进系统提示词的内容马上就过时了。
+
+过时的进度比没有进度更糟，模型可能照着旧状态去认领一个已经完成的任务。所以系统提示词里只放规则：
+
+```java
+public static final String TASK_RULE = "工作目录 .tasks/ 中有跨会话保存的任务图，用 task_* 工具维护："
+        + "多步骤、有先后依赖或需要跨会话继续的工作，先用 task_create 创建全部任务，再用 task_update 和返回的 ID 添加依赖；"
+        + "开始某个任务前 task_claim，确实做完后 task_complete。开始新会话或不确定进度时先 task_list。"
+        + "几步就能做完、不需要下次继续的事用 todo_write 列步骤即可，不要为它们建任务；"
+        + "做某个任务时，也可以用 todo_write 列出这个任务内部的步骤。";
+```
+
+当前状态让模型自己用 `task_list` 去读。启动时终端打印一行，提醒用户有进度可以接着做：
+
+```text
+任务> .tasks 中有 3 个任务，已完成 1 个
+```
+
+**权限怎么定？**
+
+```java
+// S10：任务工具只读写工作目录 .tasks 中的任务记录，不进入系统提示词，也不执行命令。
+case "task_create", "task_update", "task_list", "task_get", "task_claim", "task_complete" ->
+        new Decision(Action.ALLOW, "只读写工作目录 .tasks 中的任务记录。");
+```
+
+六个都直接放行。对比 S09 的 `memory_write` 要逐次确认，判断标准还是影响范围：记忆会进以后每次会话的系统提示词，被注入一次就是永久的；任务记录只是进度账本，不进系统提示词，也不执行任何东西。真正动代码的是 `write_file`、`shell`，它们照样要确认。
+
+六个工具同样经过 S04 的 Hook。比如给 `task_complete` 配一条 PostToolUse 命令，就能把每次完成记一笔日志。
+
+**子代理呢？**
+
+子代理没有任务工具。认领和完成代表"这件事归谁、做没做完"，应该由和用户对话的主代理负责。主代理可以认领一个任务，把具体工作派给子代理，拿到总结后自己判断是否完成。
+
+**和前几课怎么配合？**
+
+| 机制 | 行为 |
+| --- | --- |
+| S03 权限 | 六个工具直接允许，改代码的工具仍逐次确认 |
+| S04 Hook | 六个工具都触发 Pre/PostToolUse |
+| S05 TodoWrite | 保留，作为当前任务内部的步骤清单 |
+| S06 子代理 | 没有任务工具 |
+| S08 压缩 | 任务在磁盘上，压缩后用 `task_list` 重新读 |
+| S09 记忆 | 记忆存"以后还有用的事实"，任务存"要做的事和进度" |
+
+`ChatLoop` 这一课还是一行没改。
+
+**任务系统的局限**
+
+- **只考虑顺序执行**。没有加锁，两个进程同时改同一个任务可能互相覆盖。多个 Agent 抢任务是 S13 的事。
+- **没有删除、取消、重开**。不要的任务只能手动删文件；删掉一个被依赖的任务，下游会一直卡住。
+- **完没完成全凭模型说**。`task_complete` 不会去检查代码是否真的写好了、测试是否真的过了。
+- **按工作目录区分**。换个目录就是另一张任务图。根 `.gitignore` 已忽略 `.tasks/`。
+
+想看效果：让模型"把实现用户注册拆成建表、接口、测试三个任务，按依赖推进"，观察它先并行 `task_create`，再 `task_update` 连依赖。做完一个就退出，重启后说"继续"，看它是否先 `task_list` 再接着干。也可以故意让测试依赖接口、接口又依赖测试，看程序怎么拒绝。
+
+Task System 让 Agent 第一次有了跨会话接着干的"工作账本"。S05 管一次会话里的步骤，S09 管会话之间要记住的事实，S10 管要交付的任务和它们的先后顺序。后面的后台任务、定时调度和多 Agent 协作，都要在这张任务图上展开。

@@ -9,3 +9,4 @@ config.properties
 *.key
 .transcripts/
 .memory/
+.tasks/

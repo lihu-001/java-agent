@@ -1,6 +1,6 @@
 # Java Agent 实战规范
 
-当前采用九个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory。
+当前采用十个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System。
 
 ## 模块边界
 
@@ -15,6 +15,7 @@
 | s07 | dev.learnagent.s07 / SkillMain | 技能目录与 load_skill 按需加载 |
 | s08 | dev.learnagent.s08 / CompactMain | 微压缩、阈值自动总结、compact 工具与完整记录 |
 | s09 | dev.learnagent.s09 / MemoryMain | `.memory/` 跨会话记忆、索引进系统提示词、读写删工具 |
+| s10 | dev.learnagent.s10 / TaskMain | `.tasks/` 持久化任务图、blockedBy 依赖、认领与完成 |
 
 每课是前一课的源码快照加增量修改，拥有独立源码、测试、POM、配置示例、README。各模块不依赖其他课的 JAR 或源码，不使用共用 Java 核心。根 POM 为 packaging=pom，只聚合各课、管理依赖和插件版本。
 
@@ -43,6 +44,8 @@ S07 以 S06 完整源码为起点，新增 skill.SkillFile、Skill、SkillCatalo
 S08 以 S07 完整源码为起点，新增 compact.MicroCompact、TranscriptStore、ContextCompactor、CompactTool 和根包 CompactMain；S07 的 SkillMain 移入 app。ChatLoop 增加可选 ContextCompactor 构造参数，为 null 时与 S07 相同；每次请求模型前调用。微压缩保留最近 `compact.keep-tool-results`（默认 3）个工具结果原文，更早且超过 200 字符的替换为占位说明，task、load_skill、todo_write、compact 结果不替换；只作用于发送内容，内存历史保留原文。微压缩后对话（不含系统提示词）的粗略字符数超过 `compact.threshold-chars`（默认 50000），或上一批工具中有 compact 登记时：先把内存历史写成工作目录 `.transcripts/transcript-时间.jsonl`（只新建文件，写入失败则不总结），再用独立提示词、不带工具请求总结（输入最多 60000 字符，保留最近部分；摘要最多 8000 字符），历史替换为原系统提示词加一条以 `[对话已压缩]` 开头的 user 消息，其中附记录路径、摘要、程序保存的任务清单原文和最近一条真实用户输入原文。总结请求不计入每轮调用上限、不经过 Hook；失败、空回复或返回工具调用时告警并继续使用未总结的上下文。compact 参数只有可选 focus（≤200 字符），执行时只登记，本批结果补齐后的下一次请求前生效且只生效一次；PermissionPolicy 直接允许，仍经过 PreToolUse/PostToolUse。中途压缩后摘要消息成为本轮起点。子代理不压缩，也没有 compact。字符数不是 token 计数；记录可能含敏感内容，不自动清理，根 `.gitignore` 忽略 `.transcripts/`。Hook 配置固定为 `s08/.agents/hook.json`，技能目录为 `s08/.agents/skills`。详见 [S08 课程](lessons/s08-context-compact.md)。
 
 S09 以 S08 完整源码为起点，新增 memory.MemoryType、MemoryEntry、MemoryStore、MemoryReadTool、MemoryWriteTool、MemoryDeleteTool 和根包 MemoryMain；S08 的 CompactMain 移入 app，ChatLoop 不修改。记忆保存在工作目录 `.memory/<name>.md`，frontmatter 为 name（小写字母数字与连字符、≤64 字符、与文件名一致）、type（user/feedback/project/reference）、description（单行 ≤200 字符），正文非空 ≤4000 字符，文件 ≤64 KiB 严格 UTF-8、不跟随链接，最多 100 条；文件是唯一数据源，没有额外索引文件。启动时扫描一次，按名称排序，单个无效告警跳过，目录不存在视为无记忆，路径不是目录阻止启动；索引（名称、类型、描述）附在 S08 系统提示词与记忆规则之后，无记忆时只附规则。本次会话写入或删除不改动系统提示词，下次启动生效。memory_read 每次重读文件；memory_write 同名整体覆盖，经临时文件替换，新建时检查条数上限；memory_delete 删除普通文件。参数未知字段拒绝。PermissionPolicy：memory_read 直接允许，memory_write 与 memory_delete 逐次确认；三者均经过 PreToolUse/PostToolUse。子代理没有记忆工具和索引。规则声明记忆可能过时、与当前要求冲突时以后者为准、不能据此跳过权限。根 `.gitignore` 忽略 `.memory/`。Hook 配置固定为 `s09/.agents/hook.json`，技能目录为 `s09/.agents/skills`。详见 [S09 课程](lessons/s09-memory.md)。
+
+S10 以 S09 完整源码为起点，新增 task.TaskStatus、TaskRecord、TaskStore、TaskTools 和根包 TaskMain；S09 的 MemoryMain 移入 app，ChatLoop 不修改。任务保存在工作目录 `.tasks/task_xxxxxxxx.json`（`task_` 加 8 位随机小写十六进制，排他创建，冲突重试），字段只有 id、subject（单行 ≤200 字符）、description（≤4000 字符）、status（pending/in_progress/completed）、owner（pending 时为 null，其余必填，≤64 字符）、blockedBy（≤20 个其他任务 ID）；文件 ≤64 KiB 严格 UTF-8、不跟随链接、id 与文件名一致，最多 200 个。文件是唯一数据源，每次调用重读，修改经临时文件替换；无效文件告警跳过，目录不存在视为无任务，路径不是目录报错。task_update 只对 pending 任务追加依赖，整次校验存在、非自身、不成环后才保存，重复依赖去重；task_claim 要求 pending 且依赖全部 completed（缺失或无效算未完成）；task_complete 要求 in_progress 且 owner 一致，返回本次完成后依赖全部完成、且依赖本任务的 pending 下游。owner 由程序固定为 `agent`，工具没有 owner 参数；参数未知字段拒绝。任务内容不进系统提示词，S09 提示词后附 TASK_RULE；启动时终端打印任务数与已完成数。PermissionPolicy 对六个任务工具直接允许，均经过 PreToolUse/PostToolUse。子代理没有任务工具。根 `.gitignore` 忽略 `.tasks/`。Hook 配置固定为 `s10/.agents/hook.json`，技能目录为 `s10/.agents/skills`。详见 [S10 课程](lessons/s10-task-system.md)。
 
 保留前一课的组装类便于代码对照；启动应使用各模块 POM 的默认入口。例如 s04 默认 HooksMain，直接手动运行保留的 app.ToolUseMain 不会启用权限和 Hook。
 
@@ -77,7 +80,7 @@ Shell 危险命令只作为待分类字符串；真实执行用无副作用命�
 
 ## 后续课程
 
-S10 Task System、S11 Background Tasks、S12 Cron Scheduler、S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
+S11 Background Tasks、S12 Cron Scheduler、S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
 
 ## 模块拆分验证
 
@@ -158,3 +161,9 @@ S10 Task System、S11 Background Tasks、S12 Cron Scheduler、S13 Agent Teams、
 2026-10-21，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S08 为 s09 并重命名包，新增 memory 包与 MemoryMain，父 POM 聚合 s09。根目录 `.\mvnw.cmd -B clean package` 九模块全部成功：共 2196 项测试，2185 通过、11 项跳过，无失败或错误。S01—S08 源码与测试未改动，沿用上次的 1824 项；S09 共 372 项、370 通过、2 跳过（与 S08 相同的两项符号链接测试），新增 20 项（另在权限策略测试中补充三个记忆工具断言）覆盖目录缺失、写入排序与索引只含元数据、文件格式、整体覆盖不留临时文件、手动修改即时生效、删除、名称校验含路径穿越、描述与正文校验、无效文件跳过、数量上限、工具参数校验，以及第一次会话确认写入、第二次会话索引进入系统提示词且正文按需读取、拒绝写入不落盘、删除需确认、Hook 顺序与拦截、子代理无记忆工具。
 
 根目录 `-pl s09 exec:java` 以空输入（EOF）启动并退出，显示十二个工具、两个示例技能、记忆索引 0 条与 `s09/.agents/hook.json`；未请求模型。模型是否在合适时机主动保存、读取和更新记忆需真实服务单独验收。
+
+## S10 Task System 验证
+
+2026-10-22，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S09 为 s10 并重命名包，新增 task 包与 TaskMain，父 POM 聚合 s10。根目录 `.\mvnw.cmd -B clean package` 十模块全部成功：共 2588 项测试，2575 通过、13 项跳过，无失败或错误。S01—S09 源码与测试未改动，沿用上次的 2196 项；S10 共 392 项、390 通过、2 跳过（与 S09 相同的两项符号链接测试），新增 20 项（另在权限策略测试中补充六个任务工具断言）覆盖目录缺失、创建格式、标题与描述校验、依赖去重与整次校验（自身、环、缺失时不保存）、认领需依赖完成与状态约束、只有认领者能完成、完成后返回刚解锁的下游、新实例从文件恢复与渲染、缺失依赖算未完成、无效文件跳过、手动修改即时生效、不留临时文件、ID 校验，六个工具的参数校验与生命周期，以及第一次会话两阶段建图与阻塞认领、第二次会话 task_list 恢复且任务内容不进系统提示词、免确认、Hook 顺序与拦截、子代理无任务工具、启动报告无效文件。
+
+根目录 `-pl s10 exec:java` 以空输入（EOF）启动并退出，显示十八个工具、两个示例技能、记忆索引 0 条、任务 0 个与 `s10/.agents/hook.json`；未请求模型。模型是否主动拆分任务、按依赖推进和跨会话恢复需真实服务单独验收。
