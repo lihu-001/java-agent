@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-十一个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
+十二个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
 
 - `s01`：最小文本对话，无工具；入口 `dev.learnagent.s01.AgentLoopMain`。
 - `s02`：基于 S01 增加单工具、多工具分派、Shell 和文件工具；入口 `dev.learnagent.s02.ToolUseMain`。
@@ -15,6 +15,7 @@
 - `s09`：基于 S08 增加 Memory 跨会话记忆；入口 `dev.learnagent.s09.MemoryMain`。
 - `s10`：基于 S09 增加 Task System 持久化任务；入口 `dev.learnagent.s10.TaskMain`。
 - `s11`：基于 S10 增加 Background Tasks 后台任务；入口 `dev.learnagent.s11.BackgroundMain`。
+- `s12`：基于 S11 增加 Cron Scheduler 定时计划；入口 `dev.learnagent.s12.ScheduleMain`。
 
 每课有完整源码、测试、POM、配置示例与 README；类全部在本模块的 `dev.learnagent.s0N` 包及其子包。后续课复制前一课阶段源码后修改扩展，不通过跨模块 Java 依赖或 common 工程隐藏实现。用户已明确用教学快照替代旧版“共用一份循环、不复制”的要求。
 
@@ -39,6 +40,8 @@ S09 根包只保留 `MemoryMain`，`CompactMain` 移入 `app`；新增 `s09.memo
 S10 根包只保留 `TaskMain`，`MemoryMain` 移入 `app`；新增 `s10.task`：`TaskStatus`、`TaskRecord`、`TaskStore`、`TaskTools`。任务为工作目录 `.tasks/task_xxxxxxxx.json`，文件是唯一数据源，每次调用重读；`blockedBy` 依赖校验存在、非自身、无环，全部完成才能 claim，只有 owner 能 complete，owner 由程序固定为 `agent`。任务内容不进系统提示词，只附规则，用 `task_list` 恢复。六个 `task_*` 工具免确认但经过 Hook；子代理无任务工具；`ChatLoop` 不修改。Hook 配置固定为 `s10/.agents/hook.json`。
 
 S11 根包只保留 `BackgroundMain`，`TaskMain` 移入 `app`；新增 `s11.background`：`BackgroundStatus`、`BackgroundTask`、`BackgroundManager`、`BackgroundTools`。`background_run` 在守护线程用独立 ShellTool（`background.timeout-seconds`，默认 600）执行并立即返回 `bg_N`，同时最多 4 个、每会话 20 个；完成通知进线程安全队列，`ChatLoop` 每次请求模型前取出，附加到最后一条 user/tool 消息末尾，不新增角色，只送达一次，首次请求失败放回。`ChatLoop` 仅增加可选 BackgroundManager，为 null 时与 S10 相同；会话结束取消运行中的命令。`background_run` 与 shell 同规则逐次确认，`background_check` 免确认，均经过 Hook；子代理无后台工具。Hook 配置固定为 `s11/.agents/hook.json`。
+
+S12 根包只保留 `ScheduleMain`，`BackgroundMain` 移入 `app`；新增 `s12.schedule`：`CronExpression`、`ScheduleRunStatus`、`ScheduleRecord`、`ScheduleStore`、`ScheduleManager`、`ScheduleTools`。计划为工作目录 `.schedules/schedule_xxxxxxxx.json`，文件是唯一数据源，每次操作重读，临时文件原子替换；最多 50 个，根 `.gitignore` 忽略 `.schedules/`。五段 cron（分 时 日 月 周）的解析、校验与匹配委托 Hutool `CronPattern`；本类只限制五段，并在日与周同时受限时按“或”匹配，按本机时区解释，最短一分钟。`scheduler.poll-seconds` 默认 15；单守护线程轮询，到点交给 BackgroundManager 执行，命令超时仍用 `background.timeout-seconds`。计划只在进程运行期间触发，重启不补跑错过的时点；启动时把遗留 `running` 修复为 `cancelled`。同一计划上一次未结束时跳过本次时点；定时运行共享后台同时最多 4 个的上限，不占每会话 20 个用户任务额度，不出现在 `background_check`，结果不进入 `<background-results>`，完成状态和输出写回计划文件（输出截断到 2000 字符，终态记录最多保留 20 条）。六个 `schedule_*` 工具中，`schedule_create` 与 shell 共用硬拒绝并逐次确认，`schedule_list`/`schedule_get`/`schedule_pause` 免确认，`schedule_resume`/`schedule_delete` 逐次确认，均经过 Hook；子代理无定时工具；`ChatLoop` 不修改。Hook 配置固定为 `s12/.agents/hook.json`。
 
 ## 构建与测试
 

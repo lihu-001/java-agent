@@ -10,3 +10,4 @@ config.properties
 .transcripts/
 .memory/
 .tasks/
+.schedules/
