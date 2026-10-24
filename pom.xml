@@ -17,6 +17,7 @@
         <module>s09</module>
         <module>s10</module>
         <module>s11</module>
+        <module>s12</module>
     </modules>
     <properties>
         <maven.compiler.release>17</maven.compiler.release>
@@ -28,6 +29,11 @@
             <dependency>
                 <groupId>cn.hutool</groupId>
                 <artifactId>hutool-core</artifactId>
+                <version>5.8.48</version>
+            </dependency>
+            <dependency>
+                <groupId>cn.hutool</groupId>
+                <artifactId>hutool-cron</artifactId>
                 <version>5.8.48</version>
             </dependency>
             <dependency>

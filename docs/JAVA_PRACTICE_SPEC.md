@@ -1,6 +1,6 @@
 # Java Agent 实战规范
 
-当前采用十一个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks。
+当前采用十二个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler。
 
 ## 模块边界
 
@@ -17,6 +17,7 @@
 | s09 | dev.learnagent.s09 / MemoryMain | `.memory/` 跨会话记忆、索引进系统提示词、读写删工具 |
 | s10 | dev.learnagent.s10 / TaskMain | `.tasks/` 持久化任务图、blockedBy 依赖、认领与完成 |
 | s11 | dev.learnagent.s11 / BackgroundMain | 后台命令、完成通知在下次请求前自动送达 |
+| s12 | dev.learnagent.s12 / ScheduleMain | `.schedules/` 持久化 cron 计划、后台执行与结果回写 |
 
 每课是前一课的源码快照加增量修改，拥有独立源码、测试、POM、配置示例、README。各模块不依赖其他课的 JAR 或源码，不使用共用 Java 核心。根 POM 为 packaging=pom，只聚合各课、管理依赖和插件版本。
 
@@ -49,6 +50,8 @@ S09 以 S08 完整源码为起点，新增 memory.MemoryType、MemoryEntry、Mem
 S10 以 S09 完整源码为起点，新增 task.TaskStatus、TaskRecord、TaskStore、TaskTools 和根包 TaskMain；S09 的 MemoryMain 移入 app，ChatLoop 不修改。任务保存在工作目录 `.tasks/task_xxxxxxxx.json`（`task_` 加 8 位随机小写十六进制，排他创建，冲突重试），字段只有 id、subject（单行 ≤200 字符）、description（≤4000 字符）、status（pending/in_progress/completed）、owner（pending 时为 null，其余必填，≤64 字符）、blockedBy（≤20 个其他任务 ID）；文件 ≤64 KiB 严格 UTF-8、不跟随链接、id 与文件名一致，最多 200 个。文件是唯一数据源，每次调用重读，修改经临时文件替换；无效文件告警跳过，目录不存在视为无任务，路径不是目录报错。task_update 只对 pending 任务追加依赖，整次校验存在、非自身、不成环后才保存，重复依赖去重；task_claim 要求 pending 且依赖全部 completed（缺失或无效算未完成）；task_complete 要求 in_progress 且 owner 一致，返回本次完成后依赖全部完成、且依赖本任务的 pending 下游。owner 由程序固定为 `agent`，工具没有 owner 参数；参数未知字段拒绝。任务内容不进系统提示词，S09 提示词后附 TASK_RULE；启动时终端打印任务数与已完成数。PermissionPolicy 对六个任务工具直接允许，均经过 PreToolUse/PostToolUse。子代理没有任务工具。根 `.gitignore` 忽略 `.tasks/`。Hook 配置固定为 `s10/.agents/hook.json`，技能目录为 `s10/.agents/skills`。详见 [S10 课程](lessons/s10-task-system.md)。
 
 S11 以 S10 完整源码为起点，新增 background.BackgroundStatus、BackgroundTask、BackgroundManager、BackgroundTools 和根包 BackgroundMain；S10 的 TaskMain 移入 app。ChatLoop 增加可选 BackgroundManager 构造参数，为 null 时与 S10 相同。background_run 用独立 ShellTool（工作目录与输出上限同 shell，超时读 `background.timeout-seconds` 默认 600 秒）在守护线程执行，立即返回 `bg_N`；同时最多 4 个、每次会话最多 20 个，超出返回工具错误，参数只有 command，未知字段拒绝。状态由 Shell 结果判定：`退出码：0` 为 completed，命令超时为 timed_out，其他与启动异常为 failed；会话结束时取消运行中的任务为 cancelled。每次请求模型前，ChatLoop 取出通知队列中的全部通知，合并为 `<background-results>…</background-results>` 附加到当前最后一条消息末尾；该消息只可能是本轮 user 输入或本批最后一个 tool 结果，不新增消息角色，tool_call_id 不变，每条只送达一次，单条输出超过 2000 字符截断。本轮第一次请求失败时已取出的通知放回队首，下一轮再送达；工具执行后的失败保留历史，通知随之保留。后台线程完成时另在终端打印一行，程序不会为通知主动发起模型请求。background_check 省略 ID 列出任务，给出 ID 返回状态与完整输出。PermissionPolicy：background_run 与 shell 共用硬拒绝和逐次确认，确认只在启动时进行，background_check 直接允许；两者均经过 PreToolUse/PostToolUse，命令真正结束时不触发 Hook。子代理没有后台工具。ChatLoop.run 的 finally 在 exit、EOF、中断或异常时调用 shutdown，取消仍在运行的命令并打印数量；任务只在内存中，不跨会话。系统提示词在 S10 基础上追加后台规则。Hook 配置固定为 `s11/.agents/hook.json`，技能目录为 `s11/.agents/skills`。详见 [S11 课程](lessons/s11-background-tasks.md)。
+
+S12 以 S11 完整源码为起点，新增 schedule.CronExpression、ScheduleRunStatus、ScheduleRecord、ScheduleStore、ScheduleManager、ScheduleTools 和根包 ScheduleMain；S11 的 BackgroundMain 移入 app，ChatLoop 不修改。计划保存在工作目录 `.schedules/schedule_xxxxxxxx.json`（`schedule_` 加 8 位随机小写十六进制，排他创建），字段为 id、name、cron、command、enabled、createdAt、nextRunAt、lastRunAt、lastFinishedAt、lastStatus、lastOutput、runCount；文件是唯一数据源，每次操作重读，修改经临时文件原子替换，无效文件告警跳过，最多 50 个；根 `.gitignore` 忽略 `.schedules/`。CronExpression 只接受五段 cron（分 时 日 月 周），字段解析、范围校验和匹配委托 Hutool CronPattern（模块依赖 `hutool-cron`）；日与周同时受限时拆成两个表达式取较早的下一次，实现“或”语义；按传入时区解释，分辨率一分钟，下一次时间严格晚于给定时刻；非法表达式、越界值和不可能日期拒绝。ScheduleManager 在启动时把遗留 running 修复为 cancelled（输出说明上次进程退出）、统计并跳过进程未运行期间错过的时点，把下一次推进到未来，不补跑。调度线程为单个守护线程，按 `scheduler.poll-seconds`（默认 15 秒，必须为正）轮询；到点时若上一次仍 running，则只把下一次推进到未来并提示，不增加 runCount；否则在启动前写入 running（runCount 加一、nextRunAt 推进）再交给 BackgroundManager，启动失败写 failed。BackgroundManager 增加完成与关闭监听器；定时任务带 source，不占每会话 20 个用户任务额度，但共享同时最多 4 个的上限，不出现在 background_check，结果不进入 `<background-results>`；终态定时记录最多保留 20 条。完成回调只在计划文件仍为 running 时写回 completed/failed/timed_out/cancelled、结束时间和输出（最多 2000 字符，超出截断并注明）。schedule_create 参数为 name（单行 ≤100 字符）、cron、command（≤2000 字符）；schedule_list/get/pause/resume/delete 使用 id。暂停幂等，暂停时已在运行的命令继续；恢复从当前时间重算下一次；运行中的计划不能删除。PermissionPolicy：schedule_create 与 shell 共用硬拒绝和逐次确认，schedule_list/get/pause 直接允许，schedule_resume/delete 逐次确认；六个工具均经过 PreToolUse/PostToolUse。子代理没有定时工具。系统提示词在 S11 基础上追加定时规则。Hook 配置固定为 `s12/.agents/hook.json`，技能目录为 `s12/.agents/skills`。详见 [S12 课程](lessons/s12-cron-scheduler.md)。
 
 保留前一课的组装类便于代码对照；启动应使用各模块 POM 的默认入口。例如 s04 默认 HooksMain，直接手动运行保留的 app.ToolUseMain 不会启用权限和 Hook。
 
@@ -83,7 +86,7 @@ Shell 危险命令只作为待分类字符串；真实执行用无副作用命�
 
 ## 后续课程
 
-S12 Cron Scheduler、S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
+S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
 
 ## 模块拆分验证
 
@@ -176,3 +179,9 @@ S12 Cron Scheduler、S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness�
 2026-10-22，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S10 为 s11 并重命名包，新增 background 包与 BackgroundMain，父 POM 聚合 s11。根目录 `.\mvnw.cmd -B clean package` 十一模块全部成功：共 3003 项测试，2988 通过、15 项跳过，无失败或错误。S01—S10 源码与测试未改动，沿用上次的 2588 项；S11 共 415 项、413 通过、2 跳过（与 S10 相同的两项符号链接测试），新增 23 项（后台包 22 项与配置 1 项，另在权限策略测试中补充 background_run 的逐次确认、硬拒绝与缺少命令，以及 background_check 直接允许的断言）覆盖：启动立即返回且完成后只通知一次、状态按退出码与超时判定、乱序完成按完成顺序通知、放回队列后顺序不变、并发与总数上限、Shell 异常转为失败、未知 ID、关闭后取消且不通知并拒绝新任务、长输出在通知中截断而 background_check 保留全文、真实 PowerShell 后台执行与超时、退出会话不等待长命令且命令副作用未发生；后台工具参数校验与查看；主循环注册二十个工具、系统提示词为 S10 加后台规则、通知附加到最后一条 user/tool 消息且不新增角色、只出现一次、首次请求失败后放回下一轮送达、拒绝确认不启动、硬拒绝生效、exit 取消运行中的命令、Hook 顺序与拦截、子代理无后台工具；`background.timeout-seconds` 默认值与非法值。并发测试用可控的假 Shell 决定结束时机，不依赖真实等待。
 
 根目录 `-pl s11 exec:java` 以空输入（EOF）启动并退出，显示二十个工具、两个示例技能、记忆索引 0 条、任务 0 个与 `s11/.agents/hook.json`；未请求模型。模型是否在合适时机选择后台执行、等待期间是否继续做有用的事需真实服务单独验收；Unix Shell 分支未在本机执行。
+
+## S12 Cron Scheduler 验证
+
+2026-10-23，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S11 为 s12 并重命名包，新增 schedule 包与 ScheduleMain，父 POM 聚合 s12 并增加 `hutool-cron` 依赖管理。根目录 `.\mvnw.cmd -B clean package` 十二模块全部成功：共 3472 项测试，3455 通过、17 项跳过，无失败或错误。S01—S11 源码与测试未改动，沿用上次的 3003 项；S12 共 469 项、467 通过、2 跳过（与 S11 相同的两项符号链接测试），新增 54 项（schedule 包 53 项与配置 1 项，另在权限策略测试中补充六个定时工具的断言）覆盖：cron 的分钟语义、单值/范围/步长/列表、周 0 与 7、日与周“或”匹配、闰年与月末、较早月份缺少目标日期时继续向后查找、Hutool 语法（`L`、`?`）、时区解释、秒被忽略、非法与不可能表达式；计划文件的创建与重载、按 ID 排序、无效文件告警跳过、状态组合校验、超大文件与非普通文件、暂停/恢复/运行生命周期、删除、名称/cron/命令校验、50 个上限与渲染；调度器启动修复遗留 `running`、统计并跳过错过时点且不补跑、到点只触发一次并写回后台结果、结果不进入对话通知也不出现在 `background_check`、暂停不触发、运行中跳过、启动失败记为 `failed`、运行中不能删除、非法轮询间隔；六个工具的参数校验与完整生命周期；主循环注册二十六个工具、系统提示词为 S11 加定时规则、通过工具创建计划、真实 `echo` 定时执行、子代理无定时工具；`scheduler.poll-seconds` 默认值与非法值。调度线程测试使用可变时钟和显式 `tick`，不依赖真实等待。
+
+根目录 `-pl s12 exec:java` 以空输入（EOF）启动并退出，显示二十六个工具、两个示例技能、记忆索引 0 条、任务 0 个、计划 0 个与 `s12/.agents/hook.json`；未请求模型。模型是否会在合适时机创建、暂停或删除计划需真实服务单独验收；Unix Shell 分支未在本机执行。

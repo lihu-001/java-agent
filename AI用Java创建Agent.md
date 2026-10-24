@@ -1903,3 +1903,166 @@ Hook 也一样，PreToolUse / PostToolUse 只包围"启动"这个动作。`backg
 想看效果：让模型"在后台运行 `Start-Sleep 20; Write-Output 构建完成`，同时读一下 example.txt"，确认后观察 `background_run` 立即返回 `bg_1`，模型继续读文件；约 20 秒后终端出现 `后台> bg_1 completed`，下一次请求时模型收到 `<background-results>`。也可以把 `background.timeout-seconds` 改成 5，后台跑 `Start-Sleep 20`，看它变成 `timed_out`。最后启动一个长命令后立刻 exit，确认终端提示已取消，命令的副作用没有发生。
 
 后台任务让 Agent 从"一次只做一件事"变成"先开工，回头再收结果"。它把等待从主循环里拿掉，但没有解决"什么时候该主动开工"——定时、周期性的执行，要等 S12 的调度器。
+# S12、Cron Scheduler 定时计划
+
+S11 的后台任务已经能“启动后立刻返回”，但它仍然活在一次会话的内存里：程序退出，任务取消；用户不开口，结果也送不回模型。可有些事本来就不该由人坐在终端前触发——每天早上的构建、每小时的健康检查、每周的报表。它们需要的是**记住时间，到点自己执行**。
+
+S12 把“计划”和“执行”拆开：
+
+```text
+模型 ──schedule_create──→ 写入 .schedules/*.json ──→ 立即返回计划 ID
+                                      │
+                          调度线程每 15 秒检查
+                                      │ 到点
+                                      ▼
+                          BackgroundManager 执行命令
+                                      │ 完成
+                                      ▼
+                          状态与输出写回计划文件
+                                      │
+                          下一次 schedule_get / schedule_list
+```
+
+这里的关键不是“加一个定时器”，而是三个新问题：
+
+1. **计划要跨进程保留**，所以必须落盘，文件就是唯一数据源。
+2. **程序可能在两次触发之间退出**，所以启动时要处理错过的时间，还要修复上次遗留的“运行中”状态。
+3. **执行时没有用户在终端前**，所以权限只能在创建时确认一次，之后无人值守。
+
+**六个工具**
+
+- `schedule_create(name, cron, command)`：创建计划，返回 ID 和下一次触发时间。
+- `schedule_list()`：列出全部计划，含状态、cron、下一次、上次结果与触发次数。
+- `schedule_get(id)`：读取完整 JSON，包括上次输出。
+- `schedule_pause(id)`：暂停，不再触发新的运行；已在执行的命令继续跑完。
+- `schedule_resume(id)`：恢复，从当前时间重算下一次，不补跑暂停期间的时点。
+- `schedule_delete(id)`：删除；运行中的计划不能删。
+
+计划保存在工作目录 `.schedules/schedule_xxxxxxxx.json`，一个计划一个文件。文件是唯一数据源，每次操作重新读取，手工修改也会生效；写入先落临时文件再原子替换，避免写一半留下坏文件。
+
+**cron 表达式**
+
+计划字段用常见的五段 cron：`分 时 日 月 周`，例如 `*/15 * * * *`、`0 9 * * 1-5`。解析不自己写：`CronExpression` 把字段解析、范围校验和匹配交给 Hutool 的 `CronPattern`，自己只补两条约定：
+
+- 只接受五段，避免把 Quartz 的秒字段误当成分钟。
+- 日与周同时受限时按 Vixie cron 的“或”匹配。Hutool 的单个表达式按“与”处理，所以代码在两者都受限时拆成两个表达式，取较早的下一次。
+
+时间按本机时区解释，最短一分钟。`0 0 31 2 *` 这种永远不存在的日期会在计算下一次时报错，而不是无限回溯。
+
+```java
+CronExpression cron = CronExpression.parse("0 9 * * 1-5");
+Instant next = cron.next(Instant.now(), ZoneId.systemDefault());
+```
+
+依赖里因此多了 `hutool-cron`。
+
+**启动时：修复和跳过**
+
+计划可能在上次进程退出时还标着 `running`。如果不处理，它会永远显示运行中，也永远无法再次触发。启动时先把这类记录改成 `cancelled`，写明“上次进程退出时仍在运行”。
+
+然后是错过的时间。程序关了一夜，早上启动时“每小时”的计划已经错过七八个时点。S12 的选择是**统计数量、跳到未来、不补跑**：
+
+```java
+long missed = countSlots(nextRunAt, now, cron, zone);
+ScheduleRecord updated = schedule.withNextRun(cron.next(now, zone));
+store.save(updated);
+```
+
+补跑会在启动瞬间集中执行大量过期任务，既可能压垮机器，也多半不是用户想要的——错过的那次构建通常已经没有意义了。报告数量，让用户知道发生过什么就够了。
+
+**到点时：先落盘，再启动**
+
+调度线程是单个守护线程，按 `scheduler.poll-seconds`（默认 15 秒）轮询。每次重新读取计划文件，确认仍启用且 `nextRunAt` 已到：
+
+```java
+if (record.lastStatus() == ScheduleRunStatus.RUNNING) {
+    // 上一次还没结束：只推进下一次，不叠加运行。
+    store.save(record.withNextRun(record.nextRunAt().plus(...)));
+    return;
+}
+ScheduleRecord running = record.withRunStarted(now, cron.next(now, zone));
+store.save(running);                       // 先把状态写进文件
+background.start(record.command(), record.id());
+```
+
+先写 `running` 再启动，是为了让进程在两者之间崩溃时至少留下可修复的记录；反过来则可能命令已经跑了，文件里却什么都没发生。
+
+同一计划上一次还没结束时，本次时点直接跳过，不并发堆积。`runCount` 只在真正启动时加一，被跳过的时点不算一次运行。
+
+**完成后：写回文件，不进对话**
+
+S11 的 `BackgroundManager` 在任务结束时把通知放进队列。S12 给它加了完成监听器，`ScheduleManager` 注册后就能知道是哪条计划结束：
+
+```java
+private void completed(BackgroundCompletion completion) {
+    if (completion.source() == null) {
+        return;   // 用户手动启动的后台任务，不归调度器管。
+    }
+    ScheduleRecord record = store.load(completion.source());
+    if (record.lastStatus() != ScheduleRunStatus.RUNNING) {
+        return;   // 计划被删除或状态已变，忽略迟到的完成事件。
+    }
+    store.save(record.withRunFinished(map(completion.status()), now, completion.result()));
+}
+```
+
+结果**不**进入 `<background-results>`。定时任务可能在用户离开很久之后才结束，往历史里塞一条没人会看的通知，只会让上下文变长。结果留在计划文件里，用户回来问“昨天构建成功了吗”，模型用 `schedule_get` 就能回答。
+
+同时更新了后台任务的三条边界：
+
+| | 用户 `background_run` | 定时计划 |
+| --- | --- | --- |
+| 每会话总数上限 | 20 | 不占用 |
+| 同时运行上限 | 4 | 共享同一个 4 |
+| `background_check` | 可见 | 不可见 |
+| 结果送达 | `<background-results>` | 写回计划文件 |
+| 终态记录 | 会话结束即丢弃 | 最多保留 20 条 |
+
+**权限：一次确认，长期无人值守**
+
+`schedule_create` 和 `shell` 共用同一套硬拒绝规则，其他命令在创建时逐次确认一次。确认之后，每次到点都直接执行，不会再询问——那时也没有终端可以询问。
+
+```java
+case "schedule_create" -> shellDecision(requiredString(args, "command"));
+case "schedule_list", "schedule_get", "schedule_pause" -> new Decision(Action.ALLOW, "只读或暂停计划。");
+case "schedule_resume", "schedule_delete" -> new Decision(Action.ASK, "恢复或删除计划会改变后续行为。");
+```
+
+所以系统提示词里明确写了：**只调度你愿意让它自行运行的命令**。这不是沙箱，命令仍然以当前用户权限执行。
+
+`schedule_list` / `schedule_get` 只读文件，`schedule_pause` 只是停止未来的触发，都不执行命令，因此直接允许；恢复会让计划重新开始无人值守执行，删除不可撤销，所以逐次确认。
+
+**为什么暂停允许在运行中，删除不允许？**
+
+暂停只影响未来的触发，已经在跑的命令继续跑完，语义清晰。删除则会把正在运行的计划的文件删掉，完成事件回来时找不到归属，结果悬空。与其让用户猜测“删了之后那条命令还会不会写文件”，不如直接拒绝，等它跑完再删。
+
+**为什么子代理没有定时工具？**
+
+子代理的生命周期是“派发 → 执行 → 返回总结 → 丢弃”。它创建的计划在它消失之后仍然存在，出了问题却没人负责。定时计划属于主代理，和 S11 的后台工具一样。
+
+**和其他机制的关系**
+
+| 机制 | 行为 |
+| --- | --- |
+| S03 权限 | `schedule_create` 与 `shell` 共用硬拒绝；查询/暂停允许，恢复/删除确认 |
+| S04 Hook | 六个工具都触发 Pre/PostToolUse；真正到点的命令执行不再触发 Hook |
+| S05 TodoWrite | 创建计划是普通工具调用，不影响清单提醒 |
+| S06 子代理 | 没有定时工具 |
+| S08 压缩 | 定时结果不进入对话历史，不参与压缩 |
+| S09 记忆 | 长期偏好仍写记忆；计划是结构化文件 |
+| S10 任务图 | 计划负责定时触发，任务图负责跨会话工作项 |
+| S11 后台任务 | 共用执行器和同时运行上限 |
+
+`ChatLoop` 这一课完全没有修改：调度线程和对话循环通过计划文件、后台执行器解耦，不需要在请求模型前插入额外步骤。
+
+**局限**
+
+- **只在进程运行时触发**。不是操作系统计划任务；退出后不会执行，需要常驻应由外部服务托管进程。
+- **错过不补跑**。只报告数量并把下一次推进到未来。
+- **创建后无人值守**。确认只在创建时发生，只应调度愿意让它自行运行的命令。
+- **重叠时跳过**。同一计划上一次未结束，本次时点不执行。
+- **结果不主动通知**。用户离开期间完成的结果只写文件，不唤醒模型。
+- **单进程假设**。两个 Agent 进程同时打开同一个工作目录时没有跨进程锁，可能重复触发同一计划。
+- **不是沙箱**。命令以当前用户权限运行，和 `shell` 一样。
+
+想看效果：让模型“创建一个每分钟执行 `echo tick` 的计划”，确认后观察 `schedule_create` 返回 ID 和下一次时间；保持程序运行，到点后终端出现触发与完成日志；用 `schedule_get` 查看 `lastStatus`、`lastFinishedAt` 和输出。再试一次退出几分钟后重启，观察终端报告的错过时点数，确认没有补跑。最后手工把计划文件的 `lastStatus` 改成 `running` 再启动，确认它被修复为 `cancelled`。
