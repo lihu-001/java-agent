@@ -145,9 +145,9 @@ public final class ScheduleStore {
         json.put("command", schedule.command());
         json.put("enabled", schedule.enabled());
         json.put("createdAt", schedule.createdAt().toString());
-        json.put("nextRunAt", schedule.nextRunAt() == null ? null : schedule.nextRunAt().toString());
-        json.put("lastRunAt", schedule.lastRunAt() == null ? null : schedule.lastRunAt().toString());
-        json.put("lastFinishedAt", schedule.lastFinishedAt() == null ? null : schedule.lastFinishedAt().toString());
+        json.put("nextRunAt", Objects.toString(schedule.nextRunAt(), null));
+        json.put("lastRunAt", Objects.toString(schedule.lastRunAt(), null));
+        json.put("lastFinishedAt", Objects.toString(schedule.lastFinishedAt(), null));
         json.put("lastStatus", schedule.lastStatus() == null ? null : schedule.lastStatus().wireName());
         json.put("lastOutput", schedule.lastOutput());
         json.put("runCount", schedule.runCount());
@@ -255,13 +255,13 @@ public final class ScheduleStore {
         Instant lastRunAt = instant(json.get("lastRunAt"), "lastRunAt");
         Instant lastFinishedAt = instant(json.get("lastFinishedAt"), "lastFinishedAt");
         ScheduleRunStatus lastStatus = json.get("lastStatus") == null ? null
-                : ScheduleRunStatus.parse((String) requireString(json.get("lastStatus"), "lastStatus"));
+                : ScheduleRunStatus.parse(requireString(json.get("lastStatus"), "lastStatus"));
         String lastOutput = json.get("lastOutput") == null ? null
                 : requireString(json.get("lastOutput"), "lastOutput");
         int runCount = count(json.get("runCount"));
         CronExpression.parse(cronText);
-        validateName(name);
-        validateCommand(command);
+        String cleanName = validateName(name);
+        String cleanCommand = validateCommand(command);
         if (lastOutput != null && lastOutput.length() > MAX_OUTPUT_CHARS) {
             throw new IllegalArgumentException("lastOutput 最多 " + MAX_OUTPUT_CHARS + " 字符");
         }
@@ -280,7 +280,7 @@ public final class ScheduleStore {
         if (lastStatus != null && lastStatus != ScheduleRunStatus.RUNNING && lastFinishedAt == null) {
             throw new IllegalArgumentException("结束状态必须有 lastFinishedAt");
         }
-        return new ScheduleRecord(expectedId, validateName(name), cronText, validateCommand(command), enabled,
+        return new ScheduleRecord(expectedId, cleanName, cronText, cleanCommand, enabled,
                 createdAt, nextRunAt, lastRunAt, lastFinishedAt, lastStatus, lastOutput, runCount);
     }
 

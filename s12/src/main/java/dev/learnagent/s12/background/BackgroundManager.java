@@ -155,8 +155,8 @@ public final class BackgroundManager {
             elapsed = entry.elapsedMillis;
         }
         // S12：先通知监听器（含取消），定时计划在这里把结果写回自己的记录。
-        BackgroundCompletion completion = new BackgroundCompletion(entry.id, entry.source, entry.command,
-                status, result, elapsed);
+        BackgroundCompletion completion = new BackgroundCompletion(entry.id, entry.source, status, result,
+                elapsed);
         for (Consumer<BackgroundCompletion> listener : completionListeners) {
             try {
                 listener.accept(completion);

@@ -44,11 +44,6 @@ public final class ScheduleManager {
     private String lastTickError;
 
     public ScheduleManager(ScheduleStore store, BackgroundManager background, Duration pollInterval,
-                           ZoneId zone, Consumer<String> log) {
-        this(store, background, pollInterval, zone, Clock.system(zone), log);
-    }
-
-    public ScheduleManager(ScheduleStore store, BackgroundManager background, Duration pollInterval,
                            ZoneId zone, Clock clock, Consumer<String> log) {
         this.store = Objects.requireNonNull(store);
         this.background = Objects.requireNonNull(background);
@@ -106,13 +101,8 @@ public final class ScheduleManager {
                 enabled++;
                 if (!updated.nextRunAt().isAfter(now)) {
                     CronExpression cron = CronExpression.parse(updated.cron());
-                    long missed = missedSlots(cron, updated.nextRunAt(), now);
-                    Instant next = cron.next(now, zone);
-                    updated = updated.withNextRun(next);
-                    skipped += missed;
-                    log.accept("计划> " + updated.id() + "（" + updated.name() + "）启动时已错过 "
-                            + missedText(missed) + "，不补跑；下一次 "
-                            + ScheduleStore.time(next, zone));
+                    skipped += missedSlots(cron, updated.nextRunAt(), now);
+                    updated = skipMissed(updated, cron, now, "启动时已错过", "，不补跑");
                 }
             }
             if (!updated.equals(loaded)) {
@@ -128,33 +118,28 @@ public final class ScheduleManager {
         if (closed) {
             return;
         }
-        for (ScheduleRecord listed : store.list(log)) {
-            if (!listed.enabled() || listed.nextRunAt().isAfter(now)) {
-                continue;
-            }
-            ScheduleRecord schedule;
-            try {
-                // 外部可能刚编辑或删除文件，执行前重读一次。
-                schedule = store.load(listed.id());
-            } catch (IllegalArgumentException e) {
-                log.accept("计划> " + listed.id() + " 已不可读，跳过：" + e.getMessage());
-                continue;
-            }
+        // list 本身就是本次检查对计划文件的重读，无需逐个再 load。
+        for (ScheduleRecord schedule : store.list(log)) {
             if (!schedule.enabled() || schedule.nextRunAt().isAfter(now)) {
                 continue;
             }
             CronExpression cron = CronExpression.parse(schedule.cron());
             if (schedule.lastStatus() == ScheduleRunStatus.RUNNING) {
-                long missed = missedSlots(cron, schedule.nextRunAt(), now);
-                Instant next = cron.next(now, zone);
-                store.save(schedule.withNextRun(next));
-                log.accept("计划> " + schedule.id() + "（" + schedule.name()
-                        + "）上一次仍在运行，跳过 " + missedText(missed) + "；下一次 "
-                        + ScheduleStore.time(next, zone));
+                store.save(skipMissed(schedule, cron, now, "上一次仍在运行，跳过", ""));
                 continue;
             }
             fire(schedule, cron, now);
         }
+    }
+
+    /** 不补跑：把下一次时间前移到 now 之后，并报告跳过了多少个时点。 */
+    private ScheduleRecord skipMissed(ScheduleRecord schedule, CronExpression cron, Instant now,
+                                      String reason, String suffix) {
+        long missed = missedSlots(cron, schedule.nextRunAt(), now);
+        Instant next = cron.next(now, zone);
+        log.accept("计划> " + schedule.id() + "（" + schedule.name() + "）" + reason + " "
+                + missedText(missed) + suffix + "；下一次 " + ScheduleStore.time(next, zone));
+        return schedule.withNextRun(next);
     }
 
     private void fire(ScheduleRecord schedule, CronExpression cron, Instant now) {
@@ -304,8 +289,7 @@ public final class ScheduleManager {
             case COMPLETED -> ScheduleRunStatus.COMPLETED;
             case FAILED -> ScheduleRunStatus.FAILED;
             case TIMED_OUT -> ScheduleRunStatus.TIMED_OUT;
-            case CANCELLED -> ScheduleRunStatus.CANCELLED;
-            case RUNNING -> ScheduleRunStatus.CANCELLED;
+            case CANCELLED, RUNNING -> ScheduleRunStatus.CANCELLED;
         };
     }
 
@@ -325,14 +309,11 @@ public final class ScheduleManager {
     }
 
     private static String outputSuffix(String result) {
-        String text = result == null ? "" : result.strip();
+        String text = result.strip();
         return text.isEmpty() ? "" : "\n" + text;
     }
 
     static String truncate(String text) {
-        if (text == null) {
-            return "";
-        }
         return text.length() <= ScheduleStore.MAX_OUTPUT_CHARS ? text
                 : text.substring(0, ScheduleStore.MAX_OUTPUT_CHARS) + "…（已截断）";
     }
