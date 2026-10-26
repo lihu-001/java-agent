@@ -1,0 +1,42 @@
+package dev.learnagent.s14.permission;
+
+import dev.learnagent.s14.tool.ToolCall;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.PrintWriter;
+
+public final class PermissionGate implements ToolPermission {
+    private final PermissionPolicy policy;
+    private final BufferedReader input;
+    private final PrintWriter output;
+
+    public PermissionGate(PermissionPolicy policy, BufferedReader input, PrintWriter output) {
+        this.policy = policy;
+        this.input = input;
+        this.output = output;
+    }
+
+    @Override
+    public String denialReason(ToolCall call) throws IOException {
+        PermissionPolicy.Decision decision = policy.evaluate(call);
+        if (decision.action() == PermissionPolicy.Action.ALLOW) {
+            return null;
+        }
+        if (decision.action() == PermissionPolicy.Action.DENY) {
+            return decision.reason();
+        }
+        // 与 ChatLoop 共用同一个输入流；确认答案只由这里消费，不进入模型消息历史。
+        output.println("权限确认> " + decision.reason());
+        output.println("工具> " + call.name() + " [" + call.id() + "]");
+        output.println("参数> " + call.arguments());
+        output.print("仅允许本次调用？[y/N] ");
+        output.flush();
+        String answer = input.readLine();
+        if (answer == null) {
+            return "确认输入已结束，未获得本次授权。";
+        }
+        return "y".equalsIgnoreCase(answer.strip()) || "yes".equalsIgnoreCase(answer.strip())
+                ? null : "用户未批准本次调用。";
+    }
+}

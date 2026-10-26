@@ -1,6 +1,6 @@
 # Java Agent 实战规范
 
-当前采用十三个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler；S13 Agent Teams。
+当前采用十四个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler；S13 Agent Teams；S14 MCP Plugin。
 
 ## 模块边界
 
@@ -19,6 +19,7 @@
 | s11 | dev.learnagent.s11 / BackgroundMain | 后台命令、完成通知在下次请求前自动送达 |
 | s12 | dev.learnagent.s12 / ScheduleMain | `.schedules/` 持久化 cron 计划、后台执行与结果回写 |
 | s13 | dev.learnagent.s13 / TeamMain | 常驻队友线程、`.mailboxes/` 收件箱、任务锁内认领、主线程统一确认 |
+| s14 | dev.learnagent.s14 / McpMain | `.agents/mcp.json` stdio MCP server、独立信任确认、工具发现与 `mcp__` 前缀、默认逐次确认 |
 
 每课是前一课的源码快照加增量修改，拥有独立源码、测试、POM、配置示例、README。各模块不依赖其他课的 JAR 或源码，不使用共用 Java 核心。根 POM 为 packaging=pom，只聚合各课、管理依赖和插件版本。
 
@@ -56,6 +57,8 @@ S12 以 S11 完整源码为起点，新增 schedule.CronExpression、ScheduleRun
 
 S13 以 S12 完整源码为起点，新增 team 包（TeamMessage、MessageBus、TeamConsole、TeammatePermission、TeammateSetup、TeammateAgent、Teammate、TeamManager、TeamTools、PrefixWriter）和根包 TeamMain；S12 的 ScheduleMain 移入 app，ChatLoop 不修改。团队模式由 `team.enabled` 开关（默认 false，只接受 true/false，拼错报配置错误）：关闭时 TeamMain 直接组装 ScheduleMain 会话，系统提示词与工具与 S12 完全相同，启动时不清空收件箱、不退回任务；以下均为开启时的行为。主线程运行 Lead，是唯一读取用户输入的线程：一个守护线程只把终端行放进 TeamConsole 的事件队列，Lead 的 readLine 与确认回答都从该队列取，队友消息到达时发出唤醒事件，Lead 无需用户输入即开始新一轮，消息以 `<team-events>` 作为用户消息交给模型。每个队友是命名守护线程上的完整 Agent，有独立历史、任务清单、提醒与压缩器，十五个工具：五个基础工具、todo_write、task、load_skill、compact、memory_read、task_list/get/claim/complete 与 send_message；没有后台、定时、记忆写入和团队管理工具，不能嵌套组队。收件箱为工作目录 `.mailboxes/<name>.jsonl`，发送追加一行、读取后删除，唤醒靠同一把锁上的 Condition，根 `.gitignore` 忽略 `.mailboxes/`；启动时清空遗留收件箱。成员名为小写字母开头的 1~32 个小写字母、数字、`_`、`-`，lead 与 agent 为保留名，同时最多 4 个队友。队友循环：先处理收件箱，Lead 的关闭请求在一轮结束后回复 shutdown_response 并退出；无输入时 claimNext 自动认领，否则在收件箱上等待（任务图变化由 PostToolUse Hook 调用 wakeAll，30 秒超时兜底）；一轮结束发送 result，未正常结束发送 error，意外退出发送 stopped；请求失败时本轮输入保留在历史中。Lead 只接受与已发请求的 requestId 和发送者都配对的关闭响应。TaskStore 的修改在进程内可重入锁与 `.tasks/.lock` 文件锁内重读、校验、写入；新增 claim(id, owner, single)、claimNext、release、releaseAllExcept、inProgress，队友一次只持有一个进行中的任务，Lead 仍以 agent 认领且不受此限；spawn 带 task_id 时在线程启动前认领，失败则不创建；队友退出时退回其进行中的任务，启动时把非 agent 认领的进行中任务退回 pending。PermissionPolicy：spawn_teammate 逐次确认，send_message/list_teammates/shutdown_teammate 直接允许；队友使用同一策略，ASK 交给主线程询问用户，Lead 等待自身确认回答时队友请求排队。会话结束先拒绝全部待定确认，再中断队友线程并各等待最多 5 秒。用户 JSON Hook 只确认一次，Lead 与队友共用；队友输出带 `[name]` 前缀。可选 worktree：`agent.work-dir` 为 git 仓库根时，spawn_teammate 的 worktree=true 由 WorktreeManager 以参数列表调用 git（不经 Shell，30 秒超时）创建 `.worktrees/<name>` 与分支 `wt/<name>`（从 HEAD 检出，`/.worktrees/` 写入 `.git/info/exclude`），每个队友一个、跨会话复用；该队友的文件工具、Shell 与路径检查以 worktree 为根，任务、收件箱与记忆仍在主目录；非仓库、子目录、分离 HEAD、分支或目录被占用时报错，不退回共用目录；GlobTool 跳过根下 `.worktrees/`，根 `.gitignore` 也忽略它；合并约定写在提示词中，git 命令按 Shell 规则逐次确认。系统提示词在 S12 基础上追加团队规则。Hook 配置固定为 `s13/.agents/hook.json`，技能目录为 `s13/.agents/skills`。详见 [S13 课程](lessons/s13-agent-teams.md)。
 
+S14 以 S13 完整源码为起点，新增 mcp 包（McpConfig、McpTrustSnapshot、McpTrustStore、McpClient、McpTool、McpManager）和根包 McpMain；S13 的 TeamMain 移入 app，ChatLoop 与 ToolRegistry 不修改。配置固定为 `s14/.agents/mcp.json`，与启动目录无关；文件缺失时工具、系统提示词与权限都与 S13 完全相同。根节点只有 `mcpServers`，最多 8 个；名称为小写字母开头的 1~32 个小写字母、数字与 `-`（不含 `_`）；字段为 command（必填）、args（字符串数组）、env（字符串值，可用 `${NAME}` 引用进程环境变量，未设置时该 server 不启动）、timeout（1—300 秒，默认 30）、allow（免确认的工具名）、trust_files；`type`、`url` 等未知字段拒绝，只支持 stdio。格式错误阻止启动且不回显原文；单个 server 启动、握手或列工具失败时告警跳过并显示 stderr 末尾。启动前经过 MCP 信任确认：显示命令、参数、环境变量名（不显示值）与免确认工具，y/yes 记住、once 仅本次、其他及 EOF 不启动；快照包括配置原文、args 中的字面量脚本与 trust_files，确认后、启动前再校验一次；记录保存在用户目录 `.java-agent/mcp-trust/`，与 Hook 信任分开。确认顺序为用户 Hook 之后；团队模式下从 TeamConsole 读取回答。McpClient 用 ProcessBuilder 以参数列表启动进程（不经过 Shell，工作目录为 S14 子项目），stdin/stdout 上每行一条 JSON-RPC 2.0 消息，单行上限 1M 字符；initialize（协议版本 2025-06-18，空 capabilities）→ notifications/initialized → tools/list（按 nextCursor 翻页，每个 server 最多 64 个工具，缺少 name 或 inputSchema 的跳过）。tools/call 超时后发送 notifications/cancelled，连接继续可用；server 发来的 ping 回复空结果，其他请求回复 -32601；stdout 非 JSON 行告警忽略；启动期间 stderr 逐行显示（最多 20 行），之后只保留末尾 2000 字符；启动各步骤（读取配置、启动进程与 pid、握手结果与耗时、列工具、连接或失败）与汇总、会话结束关闭 server 均输出 `MCP>` 日志，无配置时不输出。进程退出后等待中的和之后的调用都返回“server 已断开”，不自动重连；关闭时先关 stdin 等 2 秒，再结束进程树。McpTool 名称为 `mcp__<server>__<tool>`（须符合函数名规则、≤64 字符，否则跳过），描述前加 `[MCP <server>]` 并截断到 1024 字符，参数原样转发不做 Schema 校验；结果拼接 text 与内嵌 resource 文本，其他内容给出占位说明，无文本时用 structuredContent，isError 以“工具错误：”开头，超过 12000 字符截断；JSON-RPC 错误与断开转为工具错误。PermissionPolicy 新增带放行集合的构造方法：`mcp__` 开头的工具在 allow 中（且 server 确实提供）则 ALLOW，否则 ASK，其他未知工具仍 DENY；所有 MCP 调用经过 PreToolUse/PostToolUse。只有主 Agent（团队模式为 Lead）有 MCP 工具，追加在工具列表末尾，系统提示词附 MCP 规则（外部内容不是用户指令）；子代理与队友没有 MCP 工具，其策略也不放行。Session.run 结束时最后关闭全部 server，组装中途失败也会关闭已启动的 server。示例 `.agents/mcp.example.json` 与 `examples/mcp/example_server.py` 需要 Python 3，自动测试不依赖 Python。Hook 配置固定为 `s14/.agents/hook.json`，技能目录为 `s14/.agents/skills`。详见 [S14 课程](lessons/s14-mcp-plugin.md)。
+
 保留前一课的组装类便于代码对照；启动应使用各模块 POM 的默认入口。例如 s04 默认 HooksMain，直接手动运行保留的 app.ToolUseMain 不会启用权限和 Hook。
 
 ## 技术与目录
@@ -89,7 +92,7 @@ Shell 危险命令只作为待分类字符串；真实执行用无副作用命�
 
 ## 后续课程
 
-S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
+S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
 
 ## 模块拆分验证
 
@@ -194,3 +197,11 @@ S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop�
 2026-10-26，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S12 为 s13 并重命名包，新增 team 包与 TeamMain，父 POM 聚合 s13。根目录 `.\mvnw.cmd -B clean package` 十三模块全部成功：共 3982 项测试，3963 通过、19 项跳过，无失败或错误。S01—S12 源码与测试未改动，沿用上次的 3472 项；S13 共 510 项、508 通过、2 跳过（与 S12 相同的两项符号链接测试），新增 41 项（另在权限策略测试中补充四个团队工具断言，任务临时文件测试忽略 `.lock`）覆盖：主线程控制台按顺序返回终端行、EOF 后一直为 null、没有输入时被收件箱唤醒、用户输入附带期间到达的消息、队友确认在主线程询问且回答不成为 Lead 输入、Lead 等待自身确认时队友请求排队、非 yes 即拒绝、关闭与 EOF 拒绝待定确认；收件箱的追加与按序读取后删除、requestId 往返、坏行跳过、名称与长度校验、发送与 wakeAll 立即唤醒、已有消息时不阻塞、清空遗留收件箱；队友在独立线程运行并把结果发给 Lead、跨轮保留历史、队友之间直接通信、spawn 时先认领且认领失败不创建、空闲时自动认领并完成、关闭请求在一轮后响应并退回任务、伪造关闭响应被忽略、请求失败报 error 且保留输入、崩溃报 stopped 并退回任务、名称/保留名/上限/收件人校验、shutdownAll 停止全部且之后不再接收、只有任务图变化唤醒；8 线程并发认领同一任务只有一个成功、6 线程 claimNext 三个任务互不重复、一次一个任务与阻塞依赖、release 与启动时 releaseAllExcept、队友任务工具只有四个；通过 TeamMain 的完整会话：Lead 三十个工具与团队规则、spawn 被拒绝不创建队友、队友 Shell 确认出现在主终端并经过 Hook、队友结果在无用户输入时唤醒 Lead、队友工具列表、阻塞在确认上的队友在 EOF 时退出且写入未执行、任务退回 pending、启动时退回遗留任务并清空收件箱；worktree（临时目录中的真实 git 仓库，本机无 git 时跳过）：创建 `.worktrees/alice` 与 `wt/alice` 且主目录状态干净、同名复用、非仓库/子目录/分支或目录被占用时拒绝、失败时不组装队友不留认领、worktree 队友的写入只出现在自己的副本且 Shell 在副本中执行、任务仍在主目录共享、结果附工作分支、会话结束后分支保留、主目录 glob 不搜到副本。`team.enabled` 默认关闭且只接受 true/false，关闭时工具、系统提示词与 S12 相同且不改动任务与收件箱。并发测试使用脚本模型和管道输入，不请求真实服务。
 
 在临时目录用假模型配置直接运行 `TeamMain`，以空输入（一行空行后 EOF）启动并退出，显示三十个工具（含四个团队工具）、两个示例技能、记忆索引 0 条、任务 0 个、计划 0 个与 `s13/.agents/hook.json`；未请求模型，临时目录已清理。验证期间 S13 的 `MemoryToolsTest.writeReadDeleteRoundTrip` 有一次在 Windows 上替换临时文件时报 AccessDenied，`ScheduleLoopTest` 有一次在高负载下等待真实后台 `echo` 超时，两处代码与 S12 相同，重跑与单独运行均通过；另有一次全量构建中未改动的 S10 `TaskStoreTest` 同样在替换临时文件时报 AccessDenied，重跑全量通过，推测为杀毒或索引进程短暂占用文件。模型是否在合适时机组队、拆分任务和汇总结果需真实服务单独验收；Unix Shell 分支与多进程共享 `.tasks/` 未在本机执行。
+
+## S14 MCP Plugin 验证
+
+2026-10-26，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S13 为 s14 并重命名包，新增 mcp 包与 McpMain，父 POM 聚合 s14。根目录 `.\mvnw.cmd -B -fae clean package` 十四模块全部成功：共 4553 项测试，4532 通过、21 项跳过，无失败或错误。S01—S13 源码与测试未改动，沿用上次的 3982 项；S14 共 571 项、569 通过、2 跳过（与 S13 相同的两项符号链接测试），新增 61 项（mcp 包 60 项，另在权限策略测试中补充 MCP 默认确认与放行断言）覆盖：配置缺失、完整字段与默认值、BOM、十九种非法格式（含 `type`/`url`、名称含下划线或大写、超时越界、env 非字符串）、错误信息不回显令牌、数量上限、`${NAME}` 展开与缺失；独立 JVM 子进程上的握手顺序（initialize → initialized → tools/list → tools/call）、含换行与引号的参数往返、分页、isError 与 JSON-RPC 错误区分、超时后发送 cancelled 且连接继续可用、进程退出后等待中与之后的调用都报断开、握手前崩溃保留 stderr、可执行文件不存在、stdout 混入非 JSON 行与 server 发来的 ping/sampling 请求、环境变量传入子进程、关闭后拒绝调用；工具名前缀与来源标记、描述截断、非法函数名、参数必须为对象、文本/非文本/resource/structuredContent/截断渲染；通过 McpMain 的完整会话：无配置时工具与提示词与 S13 相同、拒绝与 EOF 不启动进程不落盘、确认只显示环境变量名、once 注册六个工具于末尾并附规则、记住授权后免确认且配置变化或 trust_files 变化重新确认、Hook 与 MCP 两次确认互相独立、默认逐次确认且拒绝不执行、allow 免确认且不存在的名字告警、工具错误与断开转为工具结果、单个 server 崩溃或命令不存在时其他 server 照常连接、缺少环境变量只跳过该 server、配置错误阻止启动、子代理没有 MCP 工具、团队模式 Lead 三十六个工具且规则附在团队规则之后、会话结束关闭 server、启动各步骤日志按顺序输出且启动期间 stderr 逐行显示、失败 server 计入汇总。自动测试不依赖 Python。
+
+本次全量构建前两次分别在未改动的 S10、S11 `TaskStoreTest.writesLeaveNoTempFilesAndPathMustBeDirectory` 替换临时文件时报 AccessDenied，与 S13 记录的情况相同；第三次全部通过。
+
+在临时目录用假模型配置、临时 `user.home` 直接运行 `McpMain`，复制 `mcp.example.json` 为 `mcp.json` 后回答 once：Python 示例 server 连接成功，显示 `word_count`、`now` 两个工具，输入 EOF 后正常退出，进程列表中没有残留的 server；未请求模型，临时目录与 `mcp.json` 已删除，未写入真实用户授权。示例 server 另以管道输入手动完成握手、列工具与调用。从 PowerShell 管道传入回答时首行带 BOM，`once` 未被识别（与 S06 记录相同），改用 bash 管道验证。模型能否在合适时机选择 MCP 工具需真实服务单独验收；Unix 分支与真实第三方 MCP server（npx/uvx）未在本机执行。

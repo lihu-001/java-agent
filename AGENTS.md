@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-十三个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
+十四个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
 
 - `s01`：最小文本对话，无工具；入口 `dev.learnagent.s01.AgentLoopMain`。
 - `s02`：基于 S01 增加单工具、多工具分派、Shell 和文件工具；入口 `dev.learnagent.s02.ToolUseMain`。
@@ -17,6 +17,7 @@
 - `s11`：基于 S10 增加 Background Tasks 后台任务；入口 `dev.learnagent.s11.BackgroundMain`。
 - `s12`：基于 S11 增加 Cron Scheduler 定时计划；入口 `dev.learnagent.s12.ScheduleMain`。
 - `s13`：基于 S12 增加 Agent Teams 团队协作；入口 `dev.learnagent.s13.TeamMain`。
+- `s14`：基于 S13 增加 MCP Plugin 外部工具接入；入口 `dev.learnagent.s14.McpMain`。
 
 每课有完整源码、测试、POM、配置示例与 README；类全部在本模块的 `dev.learnagent.s0N` 包及其子包。后续课复制前一课阶段源码后修改扩展，不通过跨模块 Java 依赖或 common 工程隐藏实现。用户已明确用教学快照替代旧版“共用一份循环、不复制”的要求。
 
@@ -45,6 +46,8 @@ S11 根包只保留 `BackgroundMain`，`TaskMain` 移入 `app`；新增 `s11.bac
 S12 根包只保留 `ScheduleMain`，`BackgroundMain` 移入 `app`；新增 `s12.schedule`：`CronExpression`、`ScheduleRunStatus`、`ScheduleRecord`、`ScheduleStore`、`ScheduleManager`、`ScheduleTools`。计划为工作目录 `.schedules/schedule_xxxxxxxx.json`，文件是唯一数据源，每次操作重读，临时文件原子替换；最多 50 个，根 `.gitignore` 忽略 `.schedules/`。五段 cron（分 时 日 月 周）的解析、校验与匹配委托 Hutool `CronPattern`；本类只限制五段，并在日与周同时受限时按“或”匹配，按本机时区解释，最短一分钟。`scheduler.poll-seconds` 默认 15；单守护线程轮询，到点交给 BackgroundManager 执行，命令超时仍用 `background.timeout-seconds`。计划只在进程运行期间触发，重启不补跑错过的时点；启动时把遗留 `running` 修复为 `cancelled`。同一计划上一次未结束时跳过本次时点；定时运行共享后台同时最多 4 个的上限，不占每会话 20 个用户任务额度，不出现在 `background_check`，结果不进入 `<background-results>`，完成状态和输出写回计划文件（输出截断到 2000 字符，终态记录最多保留 20 条）。六个 `schedule_*` 工具中，`schedule_create` 与 shell 共用硬拒绝并逐次确认，`schedule_list`/`schedule_get`/`schedule_pause` 免确认，`schedule_resume`/`schedule_delete` 逐次确认，均经过 Hook；子代理无定时工具；`ChatLoop` 不修改。Hook 配置固定为 `s12/.agents/hook.json`。
 
 S13 根包只保留 `TeamMain`，`ScheduleMain` 移入 `app`；新增 `s13.team`：`TeamMessage`、`MessageBus`、`TeamConsole`、`TeammatePermission`、`TeammateSetup`、`TeammateAgent`、`Teammate`、`TeamManager`、`TeamTools`、`PrefixWriter`。团队模式由 `config.properties` 的 `team.enabled` 开关，默认 false，关闭时 `TeamMain` 直接组装 S12 会话（无团队规则与工具、不清空收件箱、不退回任务）。主线程运行 Lead，是唯一读取用户输入的线程：终端行、Lead 收件箱唤醒和队友确认请求进同一事件队列，`ChatLoop` 不修改。队友是命名守护线程上的完整 Agent，独立历史、清单与压缩器，最多 4 个；没有后台、定时、记忆写入与团队管理工具，不能嵌套组队。收件箱为工作目录 `.mailboxes/<name>.jsonl`，读取后删除，唤醒靠 Condition，启动时清空，根 `.gitignore` 忽略。`TaskStore` 修改在进程内锁加 `.tasks/.lock` 文件锁内完成；队友一次只持有一个任务，空闲时 `claimNext` 自动认领，退出时退回，启动时退回非 `agent` 的进行中任务。`spawn_teammate` 逐次确认，`send_message`/`list_teammates`/`shutdown_teammate` 免确认，均经过 Hook；队友的 ASK 交给主线程询问，会话结束先拒绝待定确认再停止队友。关闭响应按 requestId 与发送者配对。可选 `WorktreeManager`：工作目录为 git 仓库根时，`worktree=true` 为每个队友建 `.worktrees/<name>`（分支 `wt/<name>`），队友工具以它为根，共享存储仍在主目录；条件不满足报错，不退回共用目录；测试用临时仓库，无 git 时跳过。Hook 配置固定为 `s13/.agents/hook.json`。
+
+S14 根包只保留 `McpMain`，`TeamMain` 移入 `app`；新增 `s14.mcp`：`McpConfig`、`McpTrustSnapshot`、`McpTrustStore`、`McpClient`、`McpTool`、`McpManager`。配置固定为 `s14/.agents/mcp.json`（`mcpServers`，只支持 stdio，最多 8 个），缺失时与 S13 完全相同；格式错误阻止启动，单个 server 失败告警跳过。command/args 直接交给 ProcessBuilder，不经过 Shell，工作目录为 S14 子项目；env 值可用 `${NAME}` 引用进程环境变量，确认时只显示变量名。启动前经过独立的 MCP 信任确认（y/once/其余及 EOF 不启动），记录在用户目录 `.java-agent/mcp-trust/`，与 Hook 信任分开，测试使用临时存储。McpClient 逐行收发 JSON-RPC：initialize（2025-06-18）→ initialized → tools/list 分页；调用超时发送 cancelled，断开不重连，关闭先关 stdin 再结束进程树。工具名 `mcp__<server>__<tool>`，与内置工具一样经过 Hook 与权限：默认 ASK，mcp.json `allow` 中的工具 ALLOW。只有主 Agent（团队模式为 Lead）有 MCP 工具，子代理与队友没有；`ChatLoop` 与 `ToolRegistry` 不修改。测试使用独立 JVM 运行的 `FakeMcpServer`，不依赖 Python。Hook 配置固定为 `s14/.agents/hook.json`。
 
 ## 构建与测试
 
