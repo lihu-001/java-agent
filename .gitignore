@@ -11,3 +11,5 @@ config.properties
 .memory/
 .tasks/
 .schedules/
+.mailboxes/
+.worktrees/

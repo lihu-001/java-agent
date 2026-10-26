@@ -2066,3 +2066,314 @@ case "schedule_resume", "schedule_delete" -> new Decision(Action.ASK, "恢复或
 - **不是沙箱**。命令以当前用户权限运行，和 `shell` 一样。
 
 想看效果：让模型“创建一个每分钟执行 `echo tick` 的计划”，确认后观察 `schedule_create` 返回 ID 和下一次时间；保持程序运行，到点后终端出现触发与完成日志；用 `schedule_get` 查看 `lastStatus`、`lastFinishedAt` 和输出。再试一次退出几分钟后重启，观察终端报告的错过时点数，确认没有补跑。最后手工把计划文件的 `lastStatus` 改成 `running` 再启动，确认它被修复为 `cancelled`。
+
+# S13、Agent Teams 团队协作
+
+S06 的子代理解决了“上下文隔离”：把读大量文件的脏活放进一份独立历史，主对话只收一段总结。但它是**同步、一次性**的——`task` 调用期间主 Agent 只能等，子代理返回后就消失了。它做不到三件事：
+
+- 几块工作**同时**推进；
+- 做到一半和别人**沟通**；
+- 做完一件事**接着做**下一件，保留上下文。
+
+S13 的队友是常驻在自己线程里的完整 Agent。Lead（就是前几课一直在用的主 Agent）创建它后立即返回，队友在后台工作，结果自动送回 Lead。
+
+```text
+用户 ⇄ Lead（主线程，唯一读用户输入）
+          │ spawn_teammate / send_message / shutdown_teammate
+          ▼
+   ┌──────────────┬──────────────┐
+ alice（线程）    bob（线程）     ...   每人独立历史、任务清单、压缩器
+   │  WORK ⇄ IDLE，直到关闭或会话结束
+   └──── 共享磁盘：.mailboxes/  .tasks/ ────┘
+```
+
+| | 子代理（S06） | 队友（S13） |
+| --- | --- | --- |
+| 调用 | 同步，调用方等结果 | 异步，spawn 后立即返回 |
+| 生命周期 | 一次性，返回总结就结束 | 常驻，跨任务保留上下文 |
+| 通信 | 只有输入的提示词和返回的总结 | 收件箱双向通信，队友之间也能直接发 |
+| 并行 | 同一时刻只跑一个 | 多个队友同时运行 |
+| 成本 | 低，用完即弃 | 高，每个队友持续独立调用模型 |
+
+两者是互补而不是替代：只想查清楚一件事，用子代理；要并行做几块活、中途需要沟通，用队友。所以 Lead 和队友都保留 `task`。
+
+**先说开关：团队模式默认关闭**
+
+组队的代价很高。一次简单任务在 S12 里两次请求就能完成；组队后至少要经过“spawn → 队友从零开始的若干轮 → 结果唤醒 Lead → 汇总”，每个队友独立请求模型，Lead 每次被唤醒都带着完整历史再请求一次。即使一个队友都不建，团队规则和四个工具定义也会让每次请求多出约一千字符。
+
+实测下来，打开团队后简单任务明显变慢、调用次数和 token 都上去了。Claude Code 的做法是用一个默认关闭的开关 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` 把两种模式完全分开，S13 照做，开关放在 `config.properties`：
+
+```properties
+# 默认关闭，与 S12 单 Agent 相同；设为 true 后 Lead 可创建常驻队友。
+team.enabled=false
+```
+
+关闭时 `TeamMain` 直接组装 S12 的会话：
+
+```java
+if (!config.teamEnabled()) {
+    ScheduleMain.Session single = ScheduleMain.createSession(config, client, terminal, output,
+            projectDirectory, agentCallbacks, trustStore, todos, zone, clock, startScheduler);
+    return new Session(single.loop(), null, null, single.background(), single.schedules(), terminal, output);
+}
+```
+
+二十六个工具、系统提示词逐字相同，启动时也不碰收件箱和任务。开关只接受 `true` / `false`，写成 `yes` 会报配置错误——拼错时悄悄关闭，比报错更难排查。
+
+下面讲的都是 `team.enabled=true` 时的行为。
+
+**线程模型：只有主线程读用户输入**
+
+这一课只有一条硬规则：**只有主线程读取用户输入**。Lead 运行在主线程上；每个队友是一个命名守护线程 `teammate-<name>`。
+
+由此推出三个要解决的问题：
+
+1. **Lead 要同时等两样东西**：用户输入，或者队友发来消息。用户不说话、队友做完了，Lead 也得被唤醒。
+2. **`System.in` 的阻塞读取不能被唤醒**。没法“一边 readLine 一边等消息”。
+3. **队友也会遇到需要确认的工具**（写文件、Shell），可它不能读终端。
+
+解法是一个事件队列 `TeamConsole`。一个守护线程只负责把终端读到的行搬进队列，不做任何决定；收件箱有消息、队友要确认，也都变成队列里的事件：
+
+```java
+private sealed interface Event permits Line, End, Wake, Confirm { }
+
+private record Line(String text) implements Event { }          // 终端一行
+private record End() implements Event { }                       // 输入结束
+private record Wake() implements Event { }                      // Lead 收件箱有新消息
+private record Confirm(String member, String reason, ToolCall call,
+                       CompletableFuture<Boolean> answer) implements Event { }  // 队友要确认
+```
+
+主线程只从这一个队列取事件。“只有主线程读输入”依然成立：搬运线程只搬文本，所有决定都在主线程。
+
+Lead 的 `ChatLoop` 本来就是 `input.readLine()` 驱动的，这一课**一行没改**——只是传给它的 `BufferedReader` 换成了控制台提供的视图：没有用户输入时，`readLine()` 返回的是收件箱里的 `<team-events>`。
+
+**队友的确认：排队交给主线程**
+
+队友遇到 ASK 类工具时，把请求连同一个 `CompletableFuture` 放进主线程队列，自己阻塞等结果：
+
+```java
+public boolean confirm(String member, String reason, ToolCall call) throws InterruptedException {
+    CompletableFuture<Boolean> answer = new CompletableFuture<>();
+    open.add(answer);
+    try {
+        if (closed) {
+            return false;
+        }
+        events.add(new Confirm(member, reason, call, answer));
+        return answer.get();
+    } catch (ExecutionException e) {
+        return false;
+    } finally {
+        answer.complete(false);   // 被中断时作废请求，主线程取到后跳过
+        open.remove(answer);
+    }
+}
+```
+
+主线程取到后在终端询问，回答 `complete` 回去：
+
+```text
+权限确认> [alice] Shell 以当前用户权限执行，可能修改文件或访问工作目录之外。
+工具> shell [t1]
+参数> {"command":"mvn test"}
+允许队友 alice 本次调用？[y/N]
+```
+
+有一个细节：Lead 自己也在等确认回答时（比如在问用户是否允许 `spawn_teammate`），这时到达的队友请求**只排队，不抢走用户的这一行**；回到提示符后再依次询问。否则用户本想回答 Lead 的问题，答案却被队友拿走了。
+
+允许和硬拒绝不需要用户，在队友线程本地就决定了；只有 ASK 才走这条路。这和 Claude Code 的做法一致：“Teammate permission prompts appear in the lead session”。
+
+**通信：文件收件箱，事件唤醒**
+
+每个成员一个 `.mailboxes/<name>.jsonl`，发送就是追加一行 JSON，读取后删除（每个收件箱只有一个消费者）。
+
+为什么用文件而不是 MQ？规模不需要中间件——几个队友，消息每分钟几条，瓶颈在模型调用；文件和前几课 `.tasks`、`.memory` 是同一个模式；打开就能看到谁给谁发了什么；进程崩溃也不丢。Claude Code 的收件箱同样是文件：`~/.claude/teams/{team}/inboxes/{agent}.json`。
+
+但**文件只负责保存，唤醒靠内存**。同一把锁上的 `Condition`，发送后立即 `signalAll`：
+
+```java
+lock.lock();
+try {
+    Files.writeString(fileOf(message.to()), message.toJson() + "\n", StandardCharsets.UTF_8,
+            StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+    generation++;
+    changed.signalAll();          // 空闲的队友立即醒来
+} finally {
+    lock.unlock();
+}
+delivered.accept(message.to());   // 发给 lead 时，往主线程队列放一个 Wake
+```
+
+队友空闲时 `await(name, 30s)`：自己有消息、或发生任何发送 / `wakeAll` 就返回。30 秒超时只是兜底，覆盖“另一个进程改了 `.tasks/`”这种收不到事件的情况。
+
+没有“读收件箱”的工具。消息由运行时在下一轮前合并成一段，作为用户消息交给模型：
+
+```text
+<team-events>
+[result] alice：接口写好了，测试 12 项通过。
+[message] bob：前端还在等 /users 的返回格式
+</team-events>
+```
+
+自由消息是**网状**的：`send_message` 可以发给 lead，也可以直接发给任何活跃队友，不经过 Lead。只有关闭协议是 Lead 和队友之间的星形。
+
+**队友循环：WORK ⇄ IDLE**
+
+```java
+while (!stopping && !Thread.currentThread().isInterrupted()) {
+    List<TeamMessage> mail = bus.drain(name);
+    // 1. 关闭请求优先：回复后退出
+    // 2. 其他消息合并成本轮输入
+    if (input == null) {
+        TaskRecord claimed = tasks.claimNext(name);   // 3. 没输入就去认领一个可开始的任务
+        ...
+    }
+    if (input == null) {
+        status = Status.IDLE;
+        bus.await(name, idleScan);                    // 4. 还是没有：等待被唤醒
+        continue;
+    }
+    TeammateAgent.Outcome outcome = agent.turn(current);   // 5. WORK：跑一轮 Agent
+    bus.send(new TeamMessage(name, LEAD, outcome.completed() ? RESULT : ERROR, ...));
+}
+```
+
+几个容易忽略的地方：
+
+- **历史跨轮保留**。队友第二轮能看到第一轮做过什么，这是它和子代理最大的区别。
+- **关闭在一轮结束后才处理**。正在进行的模型请求和工具调用会先做完，然后回复 `shutdown_response` 退出。
+- **请求失败时保留输入**。Lead 的输入失败了可以让用户重打一遍；队友的输入来自收件箱，丢了就拿不回来，所以失败时把本轮消息留在历史里，报 `error` 给 Lead。
+- **退出时退回任务**。`finally` 里把手上的 in_progress 任务退回 pending，不让任务挂在一个不存在的队友名下。
+
+**任务认领：S10 的 owner 终于有用了**
+
+S10 把 owner 固定成 `agent`，当时写过：“现在只有一个 Agent，看着多余；到 S13 多个队友协作时，每个队友用自己的 owner，这条约束才真正起作用。”现在每个队友用自己的名字当 owner，仍由程序传入，模型改不了。
+
+两个队友可能同时抢同一个任务，所以 `TaskStore` 的所有修改都在两层锁内**重读、校验、写入**：
+
+```java
+private <T> T locked(LockedAction<T> action) throws IOException {
+    ReentrantLock lock = LOCKS.computeIfAbsent(directory, key -> new ReentrantLock());
+    lock.lock();
+    try {
+        if (lock.getHoldCount() > 1) {
+            return action.run();              // 同一线程嵌套调用，只加一次文件锁
+        }
+        Files.createDirectories(directory);
+        try (FileChannel channel = FileChannel.open(directory.resolve(LOCK_FILE),
+                StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+             FileLock ignored = channel.lock()) {
+            return action.run();
+        }
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+为什么两层？`FileChannel.lock` 防的是**其他进程**；同一个 JVM 里重复获取同一文件的锁会直接抛 `OverlappingFileLockException`，所以进程内必须先过一把 `ReentrantLock`。上游 Python 版用的是 `fcntl`，只能在 Unix 上跑；`FileChannel.lock` 在 Windows 上也能用。
+
+`claimNext` 把“发现可开始的任务”和“认领”放在同一把锁里，不会出现两个人看到同一个空闲任务。测试里 8 个线程同时抢一个任务，只有一个成功。
+
+另外两条约束：队友**一次只持有一个**进行中的任务；只能 list / get / claim / complete，**不能建任务、改依赖**，任务图归 Lead。
+
+有个踩过的坑：线程被中断后，`FileChannel` 遇到中断标记会直接关闭通道，退出时退回任务就失败了。所以 `finish` 里先 `Thread.interrupted()` 清掉标记，做完再恢复。
+
+**组队由模型决定，但要用户确认**
+
+队友不是工具，**创建队友**才是工具：`spawn_teammate(name, role, prompt, task_id?, worktree?)`。什么时候组队、建几个，由 Lead 的模型判断。上游只在提示词里写“用户确认前不要调用 spawn_teammate”；S13 在 `PermissionPolicy` 里让它**逐次确认**，因为每多一个队友，就多一路持续调用模型的费用：
+
+```java
+case "spawn_teammate" -> new Decision(Action.ASK, "将创建一个常驻队友线程，它会独立、持续地调用模型。");
+case "send_message", "list_teammates", "shutdown_teammate" ->
+        new Decision(Action.ALLOW, "只读写团队收件箱或查看队友状态。");
+```
+
+同时最多 4 个队友。`lead` 和 `agent` 是保留名；成员名只允许小写——Windows 文件名不区分大小写，`Alice` 和 `alice` 会写进同一个收件箱。
+
+**队友是完整 Agent，但工具少一些**
+
+| 队友有 | 队友没有 | 原因 |
+| --- | --- | --- |
+| 五个基础工具、todo_write、task、load_skill、compact | 后台任务、定时计划 | 后台工作不能比 Lead 的会话活得更久 |
+| memory_read | memory_write / delete | 记忆影响以后每次启动，交给 Lead |
+| task_list / get / claim / complete | task_create / update | 任务图归 Lead |
+| send_message | spawn / shutdown | 不支持嵌套团队 |
+
+这也和 Claude Code 一致：队友能用子代理（只能前台），不能再组自己的团队。
+
+**可选：每个队友一个 git worktree**
+
+所有队友共用一个目录时，两个人改同一个文件，后写的直接覆盖先写的，没有任何提示。worktree 把这种**静默覆盖**变成合并时**显式的冲突**，两边的版本都还在。
+
+启用条件只有一个：`agent.work-dir` 是 git 仓库的**根目录**。这时 `spawn_teammate(worktree=true)` 会执行：
+
+```text
+git worktree add -b wt/<name> .worktrees/<name> HEAD
+```
+
+默认的 `playground` 只是 java-agent 仓库里的子目录，在那里建 worktree 会检出整个仓库，所以直接报错，不悄悄退回共用目录。
+
+关键的设计选择是 **worktree 绑定到队友，而不是绑定到任务**。上游按任务绑定：认领哪个任务，cwd 就切到哪个任务的 worktree，这要求同一个队友的工具能在运行中换根目录。按队友绑定就简单了——队友的工具本来就在创建时单独组装，给它一份以 worktree 为根的配置即可：
+
+```java
+AgentConfig memberConfig = worktree == null ? config : config.withWorkDirectory(worktree.path());
+WorkspaceFiles memberFiles = new WorkspaceFiles(memberConfig.workDirectory());
+TeammatePermission permission = new TeammatePermission(
+        worktree == null ? policy : new PermissionPolicy(memberFiles), console, name);
+```
+
+`ShellTool`、`WorkspaceFiles`、`PermissionPolicy` 一个都没改。`.tasks/`、`.mailboxes/` 和记忆仍是主目录的同一份，团队协调不受影响。
+
+几处细节：git 用参数列表启动，不经过 Shell，有 30 秒超时；`/.worktrees/` 写进那个仓库的 `.git/info/exclude`，不动用户的 `.gitignore`；`GlobTool` 跳过根下的 `.worktrees/`，Lead 搜文件时不会搜到队友的副本；会话结束后 worktree 和分支都保留，下次同名队友接着用。
+
+**合并冲突怎么办**
+
+冲突主要来自两件事：任务拆分有重叠，和分支开得太久。前者靠拆任务时按文件分工、必须改同一处的用 `blockedBy` 串起来；后者靠**小步合并**。流程写在队友和 Lead 的提示词里：
+
+```text
+队友：git merge main → 做任务 → git commit → git merge main（解决冲突、跑测试）→ task_complete
+Lead：收到 result（附“工作分支 wt/<name>”）→ git merge --no-ff wt/<name> → 再跑测试
+解决不了：git merge --abort，说明冲突的文件，交给用户
+```
+
+队友已经同步过 main，Lead 合并时通常不会再冲突。git 没报冲突、合并后代码却坏了的**语义冲突**（A 改了函数签名，B 新增了旧签名的调用），只能靠合并后跑测试发现。这些 git 命令都是 Shell 调用，每一步都要用户确认。
+
+**退出与重启**
+
+`exit`、EOF 或异常结束时，顺序很重要：
+
+```java
+console.close();          // 1. 先拒绝所有等待中的确认——阻塞在确认上的队友才能醒来
+team.shutdownAll();       // 2. 再中断队友线程，每个最多等 5 秒；任务在各自的 finally 里退回
+```
+
+反过来的话，阻塞在 `future.get()` 上的队友永远等不到回答，`join` 只能超时放弃。
+
+队友只活在一次进程里，重启不恢复。所以启动时做两件清理：被已不存在的队友占着的 in_progress 任务退回 pending（`agent` 自己的不动）；上次遗留的收件箱清空，旧消息不该送给新队友。
+
+**和其他机制的关系**
+
+| 机制 | 行为 |
+| --- | --- |
+| S03 权限 | 队友同一套规则；ASK 排队到主终端；spawn_teammate 逐次确认 |
+| S04 Hook | Lead 与队友都经过 Hook 链；用户 JSON Hook 只信任确认一次，所有成员共用；任务图变化由一个 PostToolUse Hook 唤醒空闲队友 |
+| S05 TodoWrite | 每个队友自己的清单和提醒 |
+| S06 子代理 | Lead 与队友都有 task；子代理在调用者的线程里同步运行 |
+| S08 压缩 | 每个队友自己的压缩器；完整记录仍写 `.transcripts/` |
+| S09 记忆 | 队友只读 |
+| S10 任务图 | 锁内认领，一次一个，空闲自动认领，退出退回 |
+| S11 后台 / S12 定时 | 只给 Lead |
+
+**局限**
+
+- **费用随人数线性增长**。每个队友独立调用模型，Lead 每次被唤醒也要一整轮请求。简单任务别开团队模式。
+- **只在本次进程中存在**。重启不恢复队友，只清理它们留下的任务和收件箱。
+- **共用目录会互相覆盖**。不用 worktree 时，只能靠提示词约束分工。
+- **worktree 从 HEAD 检出**。主目录未提交的改动队友看不到；被忽略的文件（`config.properties`、`target/`）也不在 worktree 里。
+- **依赖任务可能读到未合并的代码**。T1 一 `task_complete`，依赖它的 T2 就解锁；如果 T2 被另一个 worktree 队友认领，而 Lead 还没合并 T1 的分支，T2 同步 main 时拿不到 T1 的改动。程序目前没有“待合并”状态。
+- **没有计划审批协议**。上游的队友不能与用户交互，所以需要计划闸门；这里每次写入和 Shell 都由用户逐次确认，价值较低，没有做。
+- **不是沙箱**。worktree 只隔离文件和分支，Shell 照样能访问当前用户能访问的一切。
+
+想看效果：在 `config.properties` 中设 `team.enabled=true`，让 Lead “建两个队友，一个统计 playground 里的文件数，一个读 example.txt 并总结”。确认组队后观察：队友输出带 `[name]` 前缀；队友的 Shell 调用在主终端请求确认，提示里写着是哪个队友；**不输入任何内容**，Lead 也会在队友完成后收到 `<team-events>` 并汇总。想试 worktree，把本仓库克隆到别处（`config.properties` 被忽略，不会带着密钥过去），把 `agent.work-dir` 指向克隆目录，让两个 `worktree=true` 的队友分别改两个 README，最后用 `git log --oneline --graph --all` 看分支与合并。最后把 `team.enabled` 改回 `false`，确认工具回到二十六个。

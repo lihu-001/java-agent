@@ -1,6 +1,6 @@
 # Java Agent 实战规范
 
-当前采用十二个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler。
+当前采用十三个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler；S13 Agent Teams。
 
 ## 模块边界
 
@@ -18,6 +18,7 @@
 | s10 | dev.learnagent.s10 / TaskMain | `.tasks/` 持久化任务图、blockedBy 依赖、认领与完成 |
 | s11 | dev.learnagent.s11 / BackgroundMain | 后台命令、完成通知在下次请求前自动送达 |
 | s12 | dev.learnagent.s12 / ScheduleMain | `.schedules/` 持久化 cron 计划、后台执行与结果回写 |
+| s13 | dev.learnagent.s13 / TeamMain | 常驻队友线程、`.mailboxes/` 收件箱、任务锁内认领、主线程统一确认 |
 
 每课是前一课的源码快照加增量修改，拥有独立源码、测试、POM、配置示例、README。各模块不依赖其他课的 JAR 或源码，不使用共用 Java 核心。根 POM 为 packaging=pom，只聚合各课、管理依赖和插件版本。
 
@@ -53,6 +54,8 @@ S11 以 S10 完整源码为起点，新增 background.BackgroundStatus、Backgro
 
 S12 以 S11 完整源码为起点，新增 schedule.CronExpression、ScheduleRunStatus、ScheduleRecord、ScheduleStore、ScheduleManager、ScheduleTools 和根包 ScheduleMain；S11 的 BackgroundMain 移入 app，ChatLoop 不修改。计划保存在工作目录 `.schedules/schedule_xxxxxxxx.json`（`schedule_` 加 8 位随机小写十六进制，排他创建），字段为 id、name、cron、command、enabled、createdAt、nextRunAt、lastRunAt、lastFinishedAt、lastStatus、lastOutput、runCount；文件是唯一数据源，每次操作重读，修改经临时文件原子替换，无效文件告警跳过，最多 50 个；根 `.gitignore` 忽略 `.schedules/`。CronExpression 只接受五段 cron（分 时 日 月 周），字段解析、范围校验和匹配委托 Hutool CronPattern（模块依赖 `hutool-cron`）；日与周同时受限时拆成两个表达式取较早的下一次，实现“或”语义；按传入时区解释，分辨率一分钟，下一次时间严格晚于给定时刻；非法表达式、越界值和不可能日期拒绝。ScheduleManager 在启动时把遗留 running 修复为 cancelled（输出说明上次进程退出）、统计并跳过进程未运行期间错过的时点，把下一次推进到未来，不补跑。调度线程为单个守护线程，按 `scheduler.poll-seconds`（默认 15 秒，必须为正）轮询；到点时若上一次仍 running，则只把下一次推进到未来并提示，不增加 runCount；否则在启动前写入 running（runCount 加一、nextRunAt 推进）再交给 BackgroundManager，启动失败写 failed。BackgroundManager 增加完成与关闭监听器；定时任务带 source，不占每会话 20 个用户任务额度，但共享同时最多 4 个的上限，不出现在 background_check，结果不进入 `<background-results>`；终态定时记录最多保留 20 条。完成回调只在计划文件仍为 running 时写回 completed/failed/timed_out/cancelled、结束时间和输出（最多 2000 字符，超出截断并注明）。schedule_create 参数为 name（单行 ≤100 字符）、cron、command（≤2000 字符）；schedule_list/get/pause/resume/delete 使用 id。暂停幂等，暂停时已在运行的命令继续；恢复从当前时间重算下一次；运行中的计划不能删除。PermissionPolicy：schedule_create 与 shell 共用硬拒绝和逐次确认，schedule_list/get/pause 直接允许，schedule_resume/delete 逐次确认；六个工具均经过 PreToolUse/PostToolUse。子代理没有定时工具。系统提示词在 S11 基础上追加定时规则。Hook 配置固定为 `s12/.agents/hook.json`，技能目录为 `s12/.agents/skills`。详见 [S12 课程](lessons/s12-cron-scheduler.md)。
 
+S13 以 S12 完整源码为起点，新增 team 包（TeamMessage、MessageBus、TeamConsole、TeammatePermission、TeammateSetup、TeammateAgent、Teammate、TeamManager、TeamTools、PrefixWriter）和根包 TeamMain；S12 的 ScheduleMain 移入 app，ChatLoop 不修改。团队模式由 `team.enabled` 开关（默认 false，只接受 true/false，拼错报配置错误）：关闭时 TeamMain 直接组装 ScheduleMain 会话，系统提示词与工具与 S12 完全相同，启动时不清空收件箱、不退回任务；以下均为开启时的行为。主线程运行 Lead，是唯一读取用户输入的线程：一个守护线程只把终端行放进 TeamConsole 的事件队列，Lead 的 readLine 与确认回答都从该队列取，队友消息到达时发出唤醒事件，Lead 无需用户输入即开始新一轮，消息以 `<team-events>` 作为用户消息交给模型。每个队友是命名守护线程上的完整 Agent，有独立历史、任务清单、提醒与压缩器，十五个工具：五个基础工具、todo_write、task、load_skill、compact、memory_read、task_list/get/claim/complete 与 send_message；没有后台、定时、记忆写入和团队管理工具，不能嵌套组队。收件箱为工作目录 `.mailboxes/<name>.jsonl`，发送追加一行、读取后删除，唤醒靠同一把锁上的 Condition，根 `.gitignore` 忽略 `.mailboxes/`；启动时清空遗留收件箱。成员名为小写字母开头的 1~32 个小写字母、数字、`_`、`-`，lead 与 agent 为保留名，同时最多 4 个队友。队友循环：先处理收件箱，Lead 的关闭请求在一轮结束后回复 shutdown_response 并退出；无输入时 claimNext 自动认领，否则在收件箱上等待（任务图变化由 PostToolUse Hook 调用 wakeAll，30 秒超时兜底）；一轮结束发送 result，未正常结束发送 error，意外退出发送 stopped；请求失败时本轮输入保留在历史中。Lead 只接受与已发请求的 requestId 和发送者都配对的关闭响应。TaskStore 的修改在进程内可重入锁与 `.tasks/.lock` 文件锁内重读、校验、写入；新增 claim(id, owner, single)、claimNext、release、releaseAllExcept、inProgress，队友一次只持有一个进行中的任务，Lead 仍以 agent 认领且不受此限；spawn 带 task_id 时在线程启动前认领，失败则不创建；队友退出时退回其进行中的任务，启动时把非 agent 认领的进行中任务退回 pending。PermissionPolicy：spawn_teammate 逐次确认，send_message/list_teammates/shutdown_teammate 直接允许；队友使用同一策略，ASK 交给主线程询问用户，Lead 等待自身确认回答时队友请求排队。会话结束先拒绝全部待定确认，再中断队友线程并各等待最多 5 秒。用户 JSON Hook 只确认一次，Lead 与队友共用；队友输出带 `[name]` 前缀。可选 worktree：`agent.work-dir` 为 git 仓库根时，spawn_teammate 的 worktree=true 由 WorktreeManager 以参数列表调用 git（不经 Shell，30 秒超时）创建 `.worktrees/<name>` 与分支 `wt/<name>`（从 HEAD 检出，`/.worktrees/` 写入 `.git/info/exclude`），每个队友一个、跨会话复用；该队友的文件工具、Shell 与路径检查以 worktree 为根，任务、收件箱与记忆仍在主目录；非仓库、子目录、分离 HEAD、分支或目录被占用时报错，不退回共用目录；GlobTool 跳过根下 `.worktrees/`，根 `.gitignore` 也忽略它；合并约定写在提示词中，git 命令按 Shell 规则逐次确认。系统提示词在 S12 基础上追加团队规则。Hook 配置固定为 `s13/.agents/hook.json`，技能目录为 `s13/.agents/skills`。详见 [S13 课程](lessons/s13-agent-teams.md)。
+
 保留前一课的组装类便于代码对照；启动应使用各模块 POM 的默认入口。例如 s04 默认 HooksMain，直接手动运行保留的 app.ToolUseMain 不会启用权限和 Hook。
 
 ## 技术与目录
@@ -86,7 +89,7 @@ Shell 危险命令只作为待分类字符串；真实执行用无副作用命�
 
 ## 后续课程
 
-S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
+S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
 
 ## 模块拆分验证
 
@@ -185,3 +188,9 @@ S13 Agent Teams、S14 MCP Plugin、S15 Integrated Harness、S16 Workflow Runtime
 2026-10-23，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S11 为 s12 并重命名包，新增 schedule 包与 ScheduleMain，父 POM 聚合 s12 并增加 `hutool-cron` 依赖管理。根目录 `.\mvnw.cmd -B clean package` 十二模块全部成功：共 3472 项测试，3455 通过、17 项跳过，无失败或错误。S01—S11 源码与测试未改动，沿用上次的 3003 项；S12 共 469 项、467 通过、2 跳过（与 S11 相同的两项符号链接测试），新增 54 项（schedule 包 53 项与配置 1 项，另在权限策略测试中补充六个定时工具的断言）覆盖：cron 的分钟语义、单值/范围/步长/列表、周 0 与 7、日与周“或”匹配、闰年与月末、较早月份缺少目标日期时继续向后查找、Hutool 语法（`L`、`?`）、时区解释、秒被忽略、非法与不可能表达式；计划文件的创建与重载、按 ID 排序、无效文件告警跳过、状态组合校验、超大文件与非普通文件、暂停/恢复/运行生命周期、删除、名称/cron/命令校验、50 个上限与渲染；调度器启动修复遗留 `running`、统计并跳过错过时点且不补跑、到点只触发一次并写回后台结果、结果不进入对话通知也不出现在 `background_check`、暂停不触发、运行中跳过、启动失败记为 `failed`、运行中不能删除、非法轮询间隔；六个工具的参数校验与完整生命周期；主循环注册二十六个工具、系统提示词为 S11 加定时规则、通过工具创建计划、真实 `echo` 定时执行、子代理无定时工具；`scheduler.poll-seconds` 默认值与非法值。调度线程测试使用可变时钟和显式 `tick`，不依赖真实等待。
 
 根目录 `-pl s12 exec:java` 以空输入（EOF）启动并退出，显示二十六个工具、两个示例技能、记忆索引 0 条、任务 0 个、计划 0 个与 `s12/.agents/hook.json`；未请求模型。模型是否会在合适时机创建、暂停或删除计划需真实服务单独验收；Unix Shell 分支未在本机执行。
+
+## S13 Agent Teams 验证
+
+2026-10-26，Windows、JDK 17.0.2、Maven Wrapper 3.9.3。复制 S12 为 s13 并重命名包，新增 team 包与 TeamMain，父 POM 聚合 s13。根目录 `.\mvnw.cmd -B clean package` 十三模块全部成功：共 3982 项测试，3963 通过、19 项跳过，无失败或错误。S01—S12 源码与测试未改动，沿用上次的 3472 项；S13 共 510 项、508 通过、2 跳过（与 S12 相同的两项符号链接测试），新增 41 项（另在权限策略测试中补充四个团队工具断言，任务临时文件测试忽略 `.lock`）覆盖：主线程控制台按顺序返回终端行、EOF 后一直为 null、没有输入时被收件箱唤醒、用户输入附带期间到达的消息、队友确认在主线程询问且回答不成为 Lead 输入、Lead 等待自身确认时队友请求排队、非 yes 即拒绝、关闭与 EOF 拒绝待定确认；收件箱的追加与按序读取后删除、requestId 往返、坏行跳过、名称与长度校验、发送与 wakeAll 立即唤醒、已有消息时不阻塞、清空遗留收件箱；队友在独立线程运行并把结果发给 Lead、跨轮保留历史、队友之间直接通信、spawn 时先认领且认领失败不创建、空闲时自动认领并完成、关闭请求在一轮后响应并退回任务、伪造关闭响应被忽略、请求失败报 error 且保留输入、崩溃报 stopped 并退回任务、名称/保留名/上限/收件人校验、shutdownAll 停止全部且之后不再接收、只有任务图变化唤醒；8 线程并发认领同一任务只有一个成功、6 线程 claimNext 三个任务互不重复、一次一个任务与阻塞依赖、release 与启动时 releaseAllExcept、队友任务工具只有四个；通过 TeamMain 的完整会话：Lead 三十个工具与团队规则、spawn 被拒绝不创建队友、队友 Shell 确认出现在主终端并经过 Hook、队友结果在无用户输入时唤醒 Lead、队友工具列表、阻塞在确认上的队友在 EOF 时退出且写入未执行、任务退回 pending、启动时退回遗留任务并清空收件箱；worktree（临时目录中的真实 git 仓库，本机无 git 时跳过）：创建 `.worktrees/alice` 与 `wt/alice` 且主目录状态干净、同名复用、非仓库/子目录/分支或目录被占用时拒绝、失败时不组装队友不留认领、worktree 队友的写入只出现在自己的副本且 Shell 在副本中执行、任务仍在主目录共享、结果附工作分支、会话结束后分支保留、主目录 glob 不搜到副本。`team.enabled` 默认关闭且只接受 true/false，关闭时工具、系统提示词与 S12 相同且不改动任务与收件箱。并发测试使用脚本模型和管道输入，不请求真实服务。
+
+在临时目录用假模型配置直接运行 `TeamMain`，以空输入（一行空行后 EOF）启动并退出，显示三十个工具（含四个团队工具）、两个示例技能、记忆索引 0 条、任务 0 个、计划 0 个与 `s13/.agents/hook.json`；未请求模型，临时目录已清理。验证期间 S13 的 `MemoryToolsTest.writeReadDeleteRoundTrip` 有一次在 Windows 上替换临时文件时报 AccessDenied，`ScheduleLoopTest` 有一次在高负载下等待真实后台 `echo` 超时，两处代码与 S12 相同，重跑与单独运行均通过；另有一次全量构建中未改动的 S10 `TaskStoreTest` 同样在替换临时文件时报 AccessDenied，重跑全量通过，推测为杀毒或索引进程短暂占用文件。模型是否在合适时机组队、拆分任务和汇总结果需真实服务单独验收；Unix Shell 分支与多进程共享 `.tasks/` 未在本机执行。
