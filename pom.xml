@@ -20,6 +20,7 @@
         <module>s12</module>
         <module>s13</module>
         <module>s14</module>
+        <module>s15</module>
     </modules>
     <properties>
         <maven.compiler.release>17</maven.compiler.release>

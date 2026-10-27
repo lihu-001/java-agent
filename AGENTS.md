@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-十四个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
+十五个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
 
 - `s01`：最小文本对话，无工具；入口 `dev.learnagent.s01.AgentLoopMain`。
 - `s02`：基于 S01 增加单工具、多工具分派、Shell 和文件工具；入口 `dev.learnagent.s02.ToolUseMain`。
@@ -18,6 +18,7 @@
 - `s12`：基于 S11 增加 Cron Scheduler 定时计划；入口 `dev.learnagent.s12.ScheduleMain`。
 - `s13`：基于 S12 增加 Agent Teams 团队协作；入口 `dev.learnagent.s13.TeamMain`。
 - `s14`：基于 S13 增加 MCP Plugin 外部工具接入；入口 `dev.learnagent.s14.McpMain`。
+- `s15`：基于 S14 集成 Harness，不新增独立机制；入口 `dev.learnagent.s15.HarnessMain`。
 
 每课有完整源码、测试、POM、配置示例与 README；类全部在本模块的 `dev.learnagent.s0N` 包及其子包。后续课复制前一课阶段源码后修改扩展，不通过跨模块 Java 依赖或 common 工程隐藏实现。用户已明确用教学快照替代旧版“共用一份循环、不复制”的要求。
 
@@ -48,6 +49,8 @@ S12 根包只保留 `ScheduleMain`，`BackgroundMain` 移入 `app`；新增 `s12
 S13 根包只保留 `TeamMain`，`ScheduleMain` 移入 `app`；新增 `s13.team`：`TeamMessage`、`MessageBus`、`TeamConsole`、`TeammatePermission`、`TeammateSetup`、`TeammateAgent`、`Teammate`、`TeamManager`、`TeamTools`、`PrefixWriter`。团队模式由 `config.properties` 的 `team.enabled` 开关，默认 false，关闭时 `TeamMain` 直接组装 S12 会话（无团队规则与工具、不清空收件箱、不退回任务）。主线程运行 Lead，是唯一读取用户输入的线程：终端行、Lead 收件箱唤醒和队友确认请求进同一事件队列，`ChatLoop` 不修改。队友是命名守护线程上的完整 Agent，独立历史、清单与压缩器，最多 4 个；没有后台、定时、记忆写入与团队管理工具，不能嵌套组队。收件箱为工作目录 `.mailboxes/<name>.jsonl`，读取后删除，唤醒靠 Condition，启动时清空，根 `.gitignore` 忽略。`TaskStore` 修改在进程内锁加 `.tasks/.lock` 文件锁内完成；队友一次只持有一个任务，空闲时 `claimNext` 自动认领，退出时退回，启动时退回非 `agent` 的进行中任务。`spawn_teammate` 逐次确认，`send_message`/`list_teammates`/`shutdown_teammate` 免确认，均经过 Hook；队友的 ASK 交给主线程询问，会话结束先拒绝待定确认再停止队友。关闭响应按 requestId 与发送者配对。可选 `WorktreeManager`：工作目录为 git 仓库根时，`worktree=true` 为每个队友建 `.worktrees/<name>`（分支 `wt/<name>`），队友工具以它为根，共享存储仍在主目录；条件不满足报错，不退回共用目录；测试用临时仓库，无 git 时跳过。Hook 配置固定为 `s13/.agents/hook.json`。
 
 S14 根包只保留 `McpMain`，`TeamMain` 移入 `app`；新增 `s14.mcp`：`McpConfig`、`McpTrustSnapshot`、`McpTrustStore`、`McpClient`、`McpTool`、`McpManager`。配置固定为 `s14/.agents/mcp.json`（`mcpServers`，只支持 stdio，最多 8 个），缺失时与 S13 完全相同；格式错误阻止启动，单个 server 失败告警跳过。command/args 直接交给 ProcessBuilder，不经过 Shell，工作目录为 S14 子项目；env 值可用 `${NAME}` 引用进程环境变量，确认时只显示变量名。启动前经过独立的 MCP 信任确认（y/once/其余及 EOF 不启动），记录在用户目录 `.java-agent/mcp-trust/`，与 Hook 信任分开，测试使用临时存储。McpClient 逐行收发 JSON-RPC：initialize（2025-06-18）→ initialized → tools/list 分页；调用超时发送 cancelled，断开不重连，关闭先关 stdin 再结束进程树。工具名 `mcp__<server>__<tool>`，与内置工具一样经过 Hook 与权限：默认 ASK，mcp.json `allow` 中的工具 ALLOW。只有主 Agent（团队模式为 Lead）有 MCP 工具，子代理与队友没有；`ChatLoop` 与 `ToolRegistry` 不修改。测试使用独立 JVM 运行的 `FakeMcpServer`，不依赖 Python。Hook 配置固定为 `s14/.agents/hook.json`。
+
+S15 根包只保留 `HarnessMain`，`McpMain` 移入 `app`；新增 `s15.harness`：`TurnEvents`、`EventHub`、`AgentConsole`、`ModelRetryPolicy`、`HarnessOptions`。不新增独立机制，只做集成与错误恢复。`ScheduleManager` 新增带事件出口的构造方法：非取消终态把一行摘要发给 `EventHub`；`BackgroundManager` 先入队通知再触发完成监听器。哨兵轮 `<system-events>`：控制台空闲时被事件唤醒，该轮不记录用户消息、不触发 UserPromptSubmit、事件合并渲染作为一条新 user 消息进入、无事件不请求模型；轮次期间 `PermissionGate` 对 ASK 立即拒绝（不读确认输入流），队友确认不受影响。通知送达语义不变（附加最后一条消息、只送达一次、未保存放回原队列）。`OpenAiClient` 把 429/503/529 映射为 `ModelUnavailableException`（Retry-After 数字秒），400/413 超长文案映射为 `ContextTooLargeException`，正文不进异常消息；限流按 Retry-After（≤60s）或指数退避（2s→4s→8s，≤30s）最多重试 3 次；上下文超长用 `ContextCompactor` force 重载立即总结一次并重试。`HarnessOptions` 为 null 时全部增强关闭（上一课入口与 S14 完全相同）；`ChatLoop` 旧构造器全部保留。关闭顺序不变。Hook 配置固定为 `s15/.agents/hook.json`。
 
 ## 构建与测试
 
