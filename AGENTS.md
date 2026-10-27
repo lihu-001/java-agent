@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-十七个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
+十八个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
 
 - `s01`：最小文本对话，无工具；入口 `dev.learnagent.s01.AgentLoopMain`。
 - `s02`：基于 S01 增加单工具、多工具分派、Shell 和文件工具；入口 `dev.learnagent.s02.ToolUseMain`。
@@ -21,6 +21,7 @@
 - `s15`：基于 S14 集成 Harness，不新增独立机制；入口 `dev.learnagent.s15.HarnessMain`。
 - `s16`：基于 S15 增加 Workflow Runtime 持久化工作流；入口 `dev.learnagent.s16.WorkflowMain`。
 - `s17`：基于 S16 增加 Goal Loop 目标循环；入口 `dev.learnagent.s17.GoalMain`。
+- `s18`：基于 S17 增加 Slash Commands 斜杠命令；入口 `dev.learnagent.s18.CommandMain`。
 
 每课有完整源码、测试、POM、配置示例与 README；类全部在本模块的 `dev.learnagent.s0N` 包及其子包。后续课复制前一课阶段源码后修改扩展，不通过跨模块 Java 依赖或 common 工程隐藏实现。用户已明确用教学快照替代旧版“共用一份循环、不复制”的要求。
 
@@ -57,6 +58,8 @@ S15 根包只保留 `HarnessMain`，`McpMain` 移入 `app`；新增 `s15.harness
 S16 根包只保留 `WorkflowMain`，`HarnessMain` 移入 `app`；新增 `s16.workflow`：`StepStatus`、`WorkflowStatus`、`WorkflowStep`、`WorkflowRecord`、`WorkflowStore`、`WorkflowRunner`、`WorkflowTools`、`WorkflowBinding`、`WorkflowStarter`。工作流为工作目录 `.workflows/workflow_xxxxxxxx.json`，文件是唯一数据源，每次调用重读，临时文件原子替换，根 `.gitignore` 忽略。`workflow_run` 从第一个未完成步骤顺序执行，每步由同一个 `SubagentRunner` 在新历史中完成，前序结果截断后附入后续步骤；每步开始与结束各落盘一次检查点，失败转 failed、中断转 paused，启动时 running 修复为 paused，失败步骤重跑。五个 `workflow_*` 工具免确认但经过 Hook，步骤内子代理写入与 Shell 仍逐次确认；只有主 Agent（团队模式为 Lead）有，子代理与队友没有；`ChatLoop`、`SubagentRunner`、`ToolRegistry` 不修改。`WorkflowStarter` 为 null 时与 S15 逐字相同。Hook 配置固定为 `s16/.agents/hook.json`。
 
 S17 根包只保留 `GoalMain`，`WorkflowMain` 移入 `app`；新增 `s17.goal`：`GoalCommand`、`GoalState`、`GoalEvaluation`、`GoalEvaluator`、`GoalDecision`、`GoalController`、`GoalStarter`。`/goal <条件>` 是终端命令（≤4000 字符），经过 UserPromptSubmit 后才设置并作为本轮任务提交，`/goal` 查看、`/goal clear` 及别名清除，均不请求模型；只在会话内存中，不跨会话。`ChatLoop` 仅增加可选 `GoalController`，为 null 时与 S16 相同：无工具调用时先经过 Goal Gate，判断器为不带工具、不经过 Hook、不计调用上限的独立请求，读去掉系统提示词的 JSON 记录（24000 字符预算，最新一条超长保留首尾），严格解析 ok/reason/impossible。未完成追加 `[目标未完成]` user 消息在同一轮续跑（共用 `agent.max-model-calls`，续跑期间不触发 Stop）；连续超过 `goal.block-cap`（默认 8）、调用上限用完或判断器失败时交还用户并保留目标，达成或无法完成时清除；运行中的手动后台命令、未送达的后台结果或工作中的队友使 Gate 暂缓；哨兵轮不续跑。`goal.evaluator-model` 留空用主模型。只有主 Agent（团队模式为 Lead）有目标，规则附在系统提示词最后；不新增工具，`SubagentRunner`、`ToolRegistry`、`PermissionPolicy` 不修改。`GoalStarter` 为 null 时与 S16 逐字相同。Hook 配置固定为 `s17/.agents/hook.json`。
+
+S18 根包只保留 `CommandMain`，`GoalMain` 移入 `app`；新增 `s18.command`：`CommandLine`、`SlashCommand`、`CommandResult`、`CommandContext`、`CommandRegistry`、`CommandSources`、`SessionCommands`、`ViewCommands`、`SkillCommands`、`CommandStarter`。命令形如 `/名称 [参数]`（名称为小写字母开头的小写字母、数字与连字符，名称后为空白或结尾），只在提示符处识别，哨兵行与确认回答不识别。本地命令（PRINT/EXIT）不请求模型、不触发 Hook、不进入历史；提示词命令（SUBMIT）替换本轮输入，经过 UserPromptSubmit 放行后才调用 onAccepted，被拒绝时附 rejectedNote。未注册的命令只提示（附前缀相近的名称）、不发给模型；不接受参数的命令带参数时拒绝。`/clear` 先写 `.transcripts/` 再清空历史（保留系统提示词）、会话清单与目标，写入失败不清空，不影响后台、队友、计划、记忆与任务文件；`/compact [重点]` 用 `ContextCompactor.compactNow` 立即总结（不看阈值、不走登记、重点 ≤200 字符）；`/context`、`/export`；查看命令 `/status`、`/tools`、`/skills`、`/mcp`、`/hooks`、`/memory`、`/todos`、`/tasks`、`/bg`、`/schedules`、`/workflows`（启用工作流时）、`/team`（团队模式），存储类每次重读文件，api-key 不显示。`/goal` 并入注册表，行为与 S17 相同；每个技能一个 `/<技能名> [补充说明]` 提示词命令，正文每次重读、与 load_skill 同格式，与内置命令重名或名称以数字开头时告警跳过。`AgentHook` 新增默认 `describe()`、`AgentHooks.descriptions()`，`McpManager.status()`，`WorkflowBinding` 增加 store。`ChatLoop` 仅增加可选 `CommandRegistry`，为 null 时与 S17 相同（仍走 S17 的 `/goal` 分支）；不新增工具、不改系统提示词，只有主 Agent（团队模式为 Lead）有命令，`/clear` 只清空 Lead；`PermissionPolicy`、`ToolRegistry`、`SubagentRunner` 不修改。`CommandStarter` 为 null 时与 S17 逐字相同。Hook 配置固定为 `s18/.agents/hook.json`。
 
 ## 构建与测试
 

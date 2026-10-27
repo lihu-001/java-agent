@@ -1,6 +1,6 @@
 # Java Agent 实战规范
 
-当前采用十七个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler；S13 Agent Teams；S14 MCP Plugin；S15 Integrated Harness；S16 Workflow Runtime；S17 Goal Loop。
+当前采用十八个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler；S13 Agent Teams；S14 MCP Plugin；S15 Integrated Harness；S16 Workflow Runtime；S17 Goal Loop；S18 Slash Commands。
 
 ## 模块边界
 
@@ -23,6 +23,7 @@
 | s15 | dev.learnagent.s15 / HarnessMain | 定时终态进对话、事件唤醒空闲循环（哨兵轮免交互确认）、限流退避重试、上下文超长响应式压缩 |
 | s16 | dev.learnagent.s16 / WorkflowMain | `.workflows/` 持久化工作流、五个 `workflow_*` 工具、逐步骤子代理执行、每步检查点与断点续跑 |
 | s17 | dev.learnagent.s17 / GoalMain | `/goal` 会话目标、无工具独立判断器、未完成同轮续跑、连续未完成与调用次数两道出口、后台与队友未结束时暂缓 |
+| s18 | dev.learnagent.s18 / CommandMain | 斜杠命令注册表：本地命令不请求模型不触发 Hook、`/clear` `/compact` `/context` `/export` 操作对话、十二个查看命令、`/goal` 与 `/<技能名>` 提示词命令、未知命令不发送 |
 
 每课是前一课的源码快照加增量修改，拥有独立源码、测试、POM、配置示例、README。各模块不依赖其他课的 JAR 或源码，不使用共用 Java 核心。根 POM 为 packaging=pom，只聚合各课、管理依赖和插件版本。
 
@@ -68,6 +69,8 @@ S16 以 S15 完整源码为起点，新增 workflow 包（StepStatus、WorkflowS
 
 S17 以 S16 完整源码为起点，新增 goal 包（GoalCommand、GoalState、GoalEvaluation、GoalEvaluator、GoalDecision、GoalController、GoalStarter）和根包 GoalMain；S16 的 WorkflowMain 移入 app，不接目标判断，行为与 S16 默认入口完全相同。本课不新增工具，SubagentRunner、ToolRegistry、PermissionPolicy 不修改；ChatLoop 新增带 GoalController 的构造方法，旧构造器逐层委托并传 null，null 时与 S16 完全相同。终端命令 `/goal <条件>` 设置或替换目标（去空白后 ≤4000 字符，超长时提示且不设置），`/goal` 查看（条件、判断次数、本轮连续未完成次数与上限、已用时间、最近理由），`/goal clear` 及别名 stop/off/reset/none/cancel（不区分大小写）清除；`/goals` 等不是命令。查看与清除不请求模型、不触发 Hook；设置时把条件包装为本轮任务，经 UserPromptSubmit 放行后才设置并记录为用户消息，被拒绝时目标不设置。每个会话同时只有一个目标，只在内存中，不跨会话。Goal Gate 位于无工具调用的结束位置：没有目标返回 ALLOW；运行中的手动后台命令、已完成未送达的后台结果或 WORKING 的队友使其返回 DEFER（不调用判断器、不计数，定时计划不算）；否则 GoalEvaluator 发出独立请求——不带工具、不经过 Hook、不计入每轮调用上限、不做限流重试，系统提示词为判断器专用，用户消息声明后续 JSON 是数据，包含 condition、omitted_messages 与 transcript（去掉主系统提示词，含 role、content、tool_calls 名称与参数；从最新完整消息往前取，预算 24000 字符，放不下的较早消息整条省略，最新一条单独超长时保留首尾各 4000 字符）。回复严格解析为 JSON 对象：ok 与 impossible 为布尔、reason 为非空字符串、两者不能同为 true，其他字段忽略，只容忍整段被一个代码块包住，理由超过 500 字符截断；格式不符、返回工具调用、请求失败均为 ERROR。ok 为 ACHIEVED、impossible 为 FAILED，两者清除目标；否则本轮连续未完成次数加一，不超过 `goal.block-cap`（默认 8，正整数）为 BLOCK，超过为 LIMIT。BLOCK 时主循环追加以 `[目标未完成]` 开头、附条件与理由的 user 消息，在同一轮 `continue`，共用 `agent.max-model-calls`，本轮视为已保存（之后失败不丢弃、通知不放回），续跑期间不触发 Stop；本轮调用次数已用完或处于 S15 哨兵轮时不写续跑消息，提示用户输入任意内容继续。其余决定结束本轮并照常触发 Stop；LIMIT 与 ERROR 保留目标交还用户。每轮开始清零连续次数，判断次数与理由保留；工具批达到调用上限时提示目标仍活跃。`goal.evaluator-model` 为空白时判断器与主 Agent 共用客户端，否则 GoalMain 以同一 base-url 与 api-key 单独构造。ScheduleMain 与 TeamMain 新增带 GoalStarter 的 createSession 重载，后台管理器（团队模式还有 TeamManager）就绪后 bind 得到控制器；只有主 Agent（团队模式为 Lead）有目标，系统提示词在工作流规则之后附 GoalController.RULE，子代理与队友没有；旧重载逐层委托并传 null，null 时工具与提示词和 S16 逐字相同。Hook 配置固定为 `s17/.agents/hook.json`，技能目录为 `s17/.agents/skills`。详见 [S17 课程](lessons/s17-goal-loop.md)。
 
+S18 以 S17 完整源码为起点，新增 command 包（CommandLine、SlashCommand、CommandResult、CommandContext、CommandRegistry、CommandSources、SessionCommands、ViewCommands、SkillCommands、CommandStarter）和根包 CommandMain；S17 的 GoalMain 移入 app，不接斜杠命令，行为与 S17 默认入口完全相同。本课不新增工具、不改系统提示词，PermissionPolicy、ToolRegistry、SubagentRunner 不修改；ChatLoop 新增带 CommandRegistry 的构造方法，旧构造器逐层委托并传 null，null 时与 S17 完全相同（仍走 S17 的 `/goal` 分支）。命令格式为 `/名称` 或 `/名称 参数`：名称为小写字母开头的小写字母、数字与连字符，名称后为空白（含全角空格）或结尾，参数去首尾空白；`/usr/bin/env`、`/Goal`、`/` 等不是命令格式，照常作为提示词。只在提示符处识别，S15 哨兵行与权限确认回答不识别。CommandRegistry 首先注册 `/help`，之后按顺序注册内置命令与技能命令，名称或别名重名时跳过后者并告警；未注册的命令打印“未知命令”并按前缀给出相近名称，不发给模型；不接受参数的命令带参数时拒绝且不执行。CommandResult 三种：PRINT 打印后等待下一行，EXIT 结束会话，SUBMIT 替换本轮输入并照常经过 UserPromptSubmit，放行后调用 onAccepted、被拒绝时在提示后附 rejectedNote。本地命令不请求模型、不触发任何 Hook、不进入历史。CommandContext 提供不可修改的历史快照（第一条必须是系统提示词）、工具定义、终端输出与 replaceHistory，主循环在命令返回后采纳替换的历史；命令处理中的 IOException 打印为“命令> 执行失败（…）”后继续，InterruptedException 结束会话。会话命令：`/exit`（别名 `/quit`）；`/clear` 先把完整历史写入工作目录 `.transcripts/`（只有系统提示词时不写），写入失败不清空，成功后历史只保留系统提示词，同时清空会话清单与当前目标，后台命令、队友、定时计划、记忆与任务文件不受影响，未送达的后台结果在下一轮送达；`/compact [重点]` 调用 ContextCompactor 新增的 compactNow（不看阈值、不走 compact 工具的登记流程、与自动压缩共用保存与总结代码，重点 ≤200 字符，无可总结内容不请求，失败时历史不变）；`/context` 显示按角色的消息数、粗略字符数、微压缩后字符数与阈值百分比、系统提示词与工具定义大小；`/export` 把当前历史写入 `.transcripts/`。查看命令：`/status`（api-key 只说明已配置）、`/tools`、`/skills`、`/mcp`（McpManager 新增 status，显示连接状态、工具与免确认）、`/hooks`（AgentHook 新增默认方法 describe，LoggingHook、CommandHook 与团队唤醒回调覆盖，AgentHooks.descriptions 按执行顺序列出实际生效的回调）、`/memory`、`/todos`、`/tasks`、`/bg`、`/schedules`、`/workflows`（WorkflowBinding 增加 store，启用工作流时注册）、`/team`（团队模式注册）；存储类每次重读文件，无效文件告警附在末尾，渲染与对应工具相同（BackgroundTools.render 改为公开）。提示词命令：`/goal` 并入注册表，查看、清除、超长提示与“经 UserPromptSubmit 放行后才设置、被拒绝时目标未设置”均与 S17 相同；每个技能注册 `/<技能名> [补充说明]`，正文每次重读，以 LoadSkillTool.render（改为公开静态）的格式附在 `[技能命令]` 说明后，补充说明附在末尾，与内置命令重名或名称以数字开头的技能告警跳过，仍可由模型 load_skill；技能文本不授予权限。ScheduleMain 与 TeamMain 新增带 CommandStarter 的 createSession 重载，组装末尾以主 Agent（团队模式为 Lead）的部件构造 CommandSources 交给 bind；只有主 Agent 有命令，`/clear` 只清空 Lead，子代理与队友没有命令；团队模式下 Lead 执行一轮期间输入的命令排队到本轮结束后执行，命令输出整段加锁。旧重载逐层委托并传 null，null 时工具、提示词与横幅和 S17 逐字相同。Hook 配置固定为 `s18/.agents/hook.json`，技能目录为 `s18/.agents/skills`。详见 [S18 课程](lessons/s18-slash-commands.md)。
+
 保留前一课的组装类便于代码对照；启动应使用各模块 POM 的默认入口。例如 s04 默认 HooksMain，直接手动运行保留的 app.ToolUseMain 不会启用权限和 Hook。
 
 ## 技术与目录
@@ -101,7 +104,7 @@ Shell 危险命令只作为待分类字符串；真实执行用无副作用命�
 
 ## 后续课程
 
-S17 为上游课程体系的最后一课。如需新增课，以当前前一课的完整源码为起点，保留已完成课程快照。
+S17 为上游课程体系的最后一课，S18 起为本工程的补充课。如需新增课，以当前前一课的完整源码为起点，保留已完成课程快照。
 
 ## 模块拆分验证
 
@@ -238,3 +241,11 @@ S17 为上游课程体系的最后一课。如需新增课，以当前前一课�
 `.\mvnw.cmd -B -fae clean package`：S01—S15 全部成功，计数与上次一致（24/102/154/265/291/307/329/352/372/392/415/469/510/571/606）；S16 与 S17 在 `.workflows` 临时文件原子替换时报 `AccessDeniedException`（S16 两项失败、五项错误，S17 五项错误，均在 S16 原有的 workflow 测试中，goal 测试全部通过）。此前一次不带 `-fae` 的全量构建在未改动的 S15 `MemoryToolsTest` 上报同类错误。随后单独运行 `-pl s16,s17 test`：S17 共 702 项、700 通过、2 项符号链接权限跳过，无失败或错误；S16 仍有一项同类错误。单独运行 S17 期间，`WorkflowToolsTest`、`ScheduleStoreTest`、`WorkflowRunnerTest` 也各出现过一次同类错误，`ScheduleEventTest` 出现过一次 3 秒等待超时；把这些类单独再跑，33 项全部通过。这类错误本次比 S13—S16 记录的频繁，都发生在 S16 及之前就存在的文件存储代码中，未改动的 S16 同样复现，推测与杀毒或索引进程占用临时文件有关，本课没有修改相关代码。本次没有得到一次全部通过的全量构建；按模块计，十七课共 6499 项测试，S01—S15 与 S17 各自有完整通过的运行。
 
 在 s17 子工程用临时假配置直接运行 `GoalMain`（BOM-free 文件重定向输入 `/goal`、`/goal clear`、`exit`）：加载 2 个示例技能、记忆 0 条、任务 0 个、工作流 0 个、计划 0 个，横幅显示判断器模型与续跑上限，两条命令只打印目标状态，没有请求模型，正常退出；临时 config.properties 已删除，工作区没有残留文件。判断器在真实模型下的严格程度、续跑消息能否把主模型拉回正轨、事件轮与团队模式下的实际体验，需要用真实服务单独验收；Unix 分支未在本机执行。
+
+## S18 Slash Commands 验证
+
+2026-10-27，Windows、JDK 17.0.2、Maven Wrapper 3.9.3（须显式指定 JAVA_HOME 为 JDK 17）。复制 S17 为 s18 并重命名包，GoalMain 移入 app，新增 command 包与 CommandMain，父 POM 聚合 s18。S18 共 744 项测试：702 项迁移自 S17；新增 42 项，其中 command 包 38 项（CommandLineTest 16、CommandRegistryTest 9、CommandLoopTest 13），迁移类中补充 4 项（HookConfigTest 的 Hook 描述 1 项、ContextCompactorTest 的 compactNow 2 项、McpLoopTest 的 MCP 状态 1 项）。新增测试首次运行全部通过，覆盖：命令格式与十三种非命令文本、全角空格分隔；注册表的 /help、别名、未知命令前缀建议、多余参数拒绝、重名告警；通过 TeamMain 的完整会话中十六个本地命令都不请求模型、不触发 Hook，api-key 不出现在输出中；工具与系统提示词与 S17 逐字相同；上一课入口 `/help` 作为普通提示词；`/clear` 先写记录再清空历史、清单与目标，写入失败不清空；`/compact` 的空对话、重点超长与带重点总结；`/context`、`/export`；`/goal` 经注册表与 S17 行为一致；技能命令经过 UserPromptSubmit、与内置命令重名或数字开头时告警；命令失败后会话继续；团队模式的 `/team` 与任务唤醒回调描述。
+
+根目录 `.\mvnw.cmd -B -fae clean package`：S01—S11 与 S14 成功；S12、S13、S15、S16、S17、S18 各有 1—2 项失败或错误，全部在已有的文件存储测试中——S13、S15 的 `ScheduleManagerTest`、S16 的 `WorkflowStoreTest`、S17 与 S18 的 `WorkflowRunnerTest` 在临时文件原子替换时报 `AccessDeniedException`；S12 与 S18 的 `ScheduleManagerTest.failedLaunchIsRecordedAsFailedAndKeepsTheNextSlot` 读到 running 而不是 failed，推测是写回 failed 的第二次替换被拒绝（同一计划先写 running 再写 failed），未能从测试输出确认。各模块测试数与上次一致（24/102/154/265/291/307/329/352/372/392/415/469/510/571/606/638/702），加 S18 共 7243 项。随后在这六个模块中单独重跑 `ScheduleManagerTest`、`WorkflowStoreTest`、`WorkflowRunnerTest`，全部通过。S18 另做过两次完整的模块测试：第一次只有 `ScheduleManagerTest` 一项同类错误，第二次只有工作流测试中的同类错误，每个测试类至少在一次完整运行中通过；把 `Workflow*Test` 与 `ScheduleManagerTest` 单独连跑三次，S18 与未改动的 S17 都是三次中一到两次出现同类错误，说明与本课改动无关。本次没有得到一次全部通过的全量构建，与 S17 的记录相同。
+
+在 s18 子工程用临时假配置直接运行 `CommandMain`（BOM-free 文件重定向输入 `/help`、`/status`、`/skills`、`/hooks`、`/context`、`/skill`、`/clear`、`/exit`）：加载 2 个示例技能，`/help` 列出内置命令与两个技能命令，`/status` 只说明 api-key 已配置，`/skill` 提示未知命令并建议 `/skills`，全程没有请求模型，正常退出；输出中没有假密钥，playground 没有变化，临时 config.properties 已删除。这次运行发现空对话 `/clear` 提示“已清空 0 条消息”，已改为“当前对话为空，无需清空”并补充断言。未用真实终端与真实模型验收：技能命令与 `/compact` 在真实模型下的效果、团队模式下 Lead 忙时命令排队的实际体验需要单独验收；Unix 分支未在本机执行。
