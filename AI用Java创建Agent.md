@@ -2412,6 +2412,8 @@ MCP（Model Context Protocol）把“工具”从 Agent 里拿出去，变成一
                                           ←──stdout── 结果
 ```
 
+![](agent-mcp.png)
+
 **先说清楚：stdio 是什么意思**
 
 stdio 就是标准输入（stdin）和标准输出（stdout），一个命令行程序“读输入、打印输出”的那两个通道。stdio 型 MCP server 就是一个普通命令行程序：从 stdin 读一行 JSON，处理完往 stdout 打印一行 JSON。
@@ -2549,11 +2551,11 @@ public String execute(String arguments) throws IOException, InterruptedException
 这里要分清三种失败，它们对模型的意义不同：
 
 
-| 情况               | 例子                     | 回给模型                                   |
-| ---------------- | ---------------------- | -------------------------------------- |
-| `isError: true`  | 工具执行了，但失败了（磁盘满、文件不存在） | `工具错误：磁盘已满`，模型可以据此修正参数重试              |
+| 情况               | 例子                     | 回给模型                               |
+| ---------------- | ---------------------- | ---------------------------------- |
+| `isError: true`  | 工具执行了，但失败了（磁盘满、文件不存在）  | `工具错误：磁盘已满`，模型可以据此修正参数重试           |
 | JSON-RPC `error` | 协议层错误（工具名不存在 `-32602`） | `工具错误：tools/call 失败：Unknown tool…` |
-| 进程断开             | server 崩溃、退出           | `server 已断开`，本次会话不会重连                 |
+| 进程断开             | server 崩溃、退出           | `server 已断开`，本次会话不会重连              |
 
 
 **这一课最关键的一点：`ChatLoop` 和 `ToolRegistry` 一行没改**
@@ -2676,14 +2678,14 @@ List<String> args = List.of("-cp", classPath(), FakeMcpServer.class.getName(), m
 **和其他机制的关系**
 
 
-| 机制              | 行为                                                   |
-| --------------- | ---------------------------------------------------- |
-| S03 权限          | `mcp__*` 默认逐次确认，`allow` 中的放行；其他未知工具仍拒绝               |
+| 机制              | 行为                                                  |
+| --------------- | --------------------------------------------------- |
+| S03 权限          | `mcp__*` 默认逐次确认，`allow` 中的放行；其他未知工具仍拒绝              |
 | S04 Hook        | MCP 调用照常触发 Pre/PostToolUse；MCP 信任与 Hook 信任分开确认、分开存储 |
-| S06 子代理         | 没有 MCP 工具                                            |
-| S08 压缩          | MCP 结果是普通工具结果，参与微压缩                                  |
-| S11 后台 / S12 定时 | 互不相关；定时命令走 Shell，不能调 MCP                             |
-| S13 团队          | 只有 Lead 有；确认从控制台读取；队友没有                              |
+| S06 子代理         | 没有 MCP 工具                                           |
+| S08 压缩          | MCP 结果是普通工具结果，参与微压缩                                 |
+| S11 后台 / S12 定时 | 互不相关；定时命令走 Shell，不能调 MCP                            |
+| S13 团队          | 只有 Lead 有；确认从控制台读取；队友没有                             |
 
 
 **局限**
@@ -2718,3 +2720,438 @@ List<String> args = List.of("-cp", classPath(), FakeMcpServer.class.getName(), m
 ```
 
 `everything` 是官方专门用来测试客户端的 server，`time` 能查时间、换算时区，两个都不碰你的文件。Windows 上要写 `npx.cmd`：程序不经过 Shell 启动进程，直接写 `npx` 可能找不到。连上后问模型“现在东京几点”，观察它选了哪个 MCP 工具、权限确认里的参数，以及退出时 `MCP> 已关闭 2 个 server`。
+
+# S15、Integrated Harness 集成运行时
+
+十四课下来，每个机制单独都验证过了。但“单独能跑”和“一起能跑”是两回事，有几道缝，单课的视角根本看不见：
+
+- S11 的后台结果要等用户下一次输入才送达；S12 的定时结果只写进计划文件，模型永远不知道定时任务干完了什么。凌晨三点定时构建结束，程序和用户谁都不知道。
+- 程序如果想在事件到达时主动发起一轮对话，这一轮里模型请求写文件怎么办？确认流程会卡在终端上，而用户可能根本不在旁边。
+- 服务商限流（HTTP 429）一碰上，本轮直接作废。长任务跑到 90% 被限流一次，前面几十次请求就全白费了。
+- 对话超过模型上下文窗口时直接报错。S08 的压缩只在超过阈值时触发，收到“超长”错误时再压缩已经晚了。
+
+S15 **不新增任何机制**：不加工具（无 `mcp.json` 时工具和 S14 完全相同）、不加存储目录、不加协议。它做两件事：把十四个机制挂到**同一条循环**上，并补上组合时才暴露的缺口。你现在用的 Claude Code 本身就是这样一个集成运行时——前面每课对应它的一个能力，这一课把它们捏成一个整体。
+
+先画出完整管线。这是十四课以来第一次把它完整画出来，之前每课只画自己那一段：
+
+```text
+输入来源：用户输入 / 程序事件（定时终态、后台完成）
+→ UserPromptSubmit Hook（仅用户输入）
+→ 取用并合并程序事件（定时 <system-events> 在前，后台 <background-results> 在后）
+→ 上下文压缩（阈值自动 / compact 登记）
+→ 请求模型（限流退避重试；上下文超长先响应式压缩）
+→ 无工具调用：Stop Hook，本轮结束
+→ 有工具调用：PreToolUse → 权限（程序轮 ASK 自动拒绝）→ 执行 → PostToolUse → 回传 → 下一轮
+```
+
+![](agent-inter.png)
+
+对照代码就是 `loop/ChatLoop` 的 `converse` 方法，从上到下逐段可读。
+
+**先交代兼容性：上一课入口逐字不变**
+
+前十四课有个传统：每课保留上一课的入口便于对照，S13 的教程还专门验证过“关闭团队模式时系统提示词逐字相同”。S15 动了 `ChatLoop` 的方法体——这是 S02 以来第一次——所以这个传统必须更认真地守。
+
+集成的所有增强都挂在一个开关对象上：
+
+```java
+/** options 非 null 时启用事件唤醒、限流退避与响应式压缩；null 时与 S14 相同。 */
+public record HarnessOptions(EventHub events, ModelRetryPolicy retry, BufferedReader loopInput) {
+}
+```
+
+三个入口的行为：
+
+
+| 入口                               | options | 行为         |
+| -------------------------------- | ------- | ---------- |
+| `HarnessMain`（S15 默认）            | 有       | 全部增强       |
+| `app.McpMain`（S14 入口）            | 无       | 与 S14 完全相同 |
+| `ScheduleMain` / `TeamMain` 新增重载 | 按调用者    | 供嵌入与测试     |
+
+
+“完全相同”必须逐字成立，包括系统提示词。定时终态送达是新能力，直接改 `SCHEDULE_RULE` 会让上一课入口的提示词也变，所以新规则单独成段、只在启用时追加：
+
+```java
+/** S15：事件唤醒可用时附加终态送达说明。 */
+public static String systemPrompt(SkillCatalog catalog, List<MemoryEntry> entries, boolean scheduledEvents) {
+    return systemPrompt(catalog, entries) + (scheduledEvents ? "\n\n" + SCHEDULE_EVENT_RULE : "");
+}
+```
+
+旧的构造器和组装重载一个都没删，逐层委托到最全的新版本。对照的前提是行为真的相同，这句话说了十四课，这一课开始要靠代码结构来保证，而不是靠自觉。
+
+**事件唤醒：程序也能发起一轮**
+
+S11 的结尾写过一句话：“后台任务是‘下次见面时告诉你’，不是‘打电话叫醒你’”。当时给了两个理由：模型请求要花钱，结果可能只是“构建成功”，不值得单独开一轮；没有用户的新问题，模型拿到结果也不知道该干什么。
+
+S15 要把这句话改掉一半。对用户手动启动的后台任务，那两个理由仍然成立；但**定时计划**不一样——它是模型自己决定要周期性执行的事，到点跑完了，结果却永远到不了模型手里，计划就失去了意义。所以 S15 的选择是：定时计划的结束结果送进对话，后台任务的结果继续走 S11 的老路，但两者都会**唤醒空闲的循环**。
+
+难点立刻出现：`System.in` 上的阻塞 `readLine` 没法被其他线程唤醒。这个问题 S13 解决过一次——`TeamConsole` 用一个守护线程把终端行搬进队列，`readLine` 从队列取。S15 把同一个模式泛化到单 Agent，新建 `AgentConsole`（只有 Line / End / Wake 三种事件，比 `TeamConsole` 简单，没有确认请求）；团队模式则复用 `TeamConsole`，加一个重载让程序事件也能唤醒 Lead，但**队友消息优先**。
+
+两个控制台唤醒时返回的都是同一行哨兵文本：
+
+```java
+public static final String WAKE_LINE = "<system-events>";
+```
+
+为什么用哨兵行，而不是让控制台直接把事件文本当作输入返回？因为**送达点必须只有一处**。事件从哪来、怎么合并、放回给谁，这些逻辑都集中在 `ChatLoop` 里（`EventHub` 管定时事件，`BackgroundManager` 管后台通知）；控制台只负责“叫人”，不搬运内容。送达一次、失败放回、渲染格式，全都只写一遍。
+
+哨兵行进入 `ChatLoop` 后，这一轮和用户轮有四点不同：
+
+```java
+// S15：程序事件的哨兵行不是用户输入，不记录消息、不触发 UserPromptSubmit。
+boolean synthetic = events != null && TurnEvents.isWake(line);
+```
+
+1. **不记录用户消息、不触发 UserPromptSubmit**。它本来就不是提示词，把它记成“用户说了 `<system-events>`”会污染历史；
+2. **事件作为一条新的 user 消息进入**。哨兵轮没有本轮的 user/tool 消息可附加，历史尾部可能只有系统提示词，所以事件合并渲染后自成一条；
+3. **没有待送达事件就直接回到等待**。唤醒后事件可能已被上一轮取走，这时不空请求模型——空轮就是白花钱；
+4. **轮次期间不能交互确认**。这是最重要的一条，单独展开。
+
+**程序发起的轮次，为什么不能等用户确认**
+
+想象这个场景：一条深夜定时计划到点执行，唤醒了循环，模型看完结果觉得应该把报告写进文件。`write_file` 是 ASK 类工具，权限检查在终端打印“仅允许本次调用？[y/N]”然后等输入——用户在睡觉，程序就挂在那里直到天亮，后续的定时计划也全部堵死。
+
+所以程序发起的轮次（S15 里叫“哨兵轮”）期间，`EventHub` 上有一个标记，`PermissionGate` 检查它：
+
+```java
+if (asyncTurn != null && asyncTurn.getAsBoolean()) {
+    return "本消息由程序事件自动发起，用户可能不在终端旁，交互确认被拒绝；"
+            + "需要执行时请在用户回来后请求批准。";
+}
+```
+
+拒绝消息本身会作为工具结果进入历史，用户回来后能看到模型试过什么、为什么没做成，再亲自批准。注意这个限制**只作用于程序轮**：队友的确认不受影响，它们本来就是排队交给主线程的（S13 的设计）；用户发起的轮次更不受影响。
+
+**唤醒与入队的时序，一个真实踩过的坑**
+
+唤醒事件和通知入队是两个线程上的两步操作。第一版实现里 `BackgroundManager` 先触发完成监听器（监听器负责唤醒控制台）、再把结果放进通知队列——唤醒的循环醒来时队列还是空的，什么都取不到。修复是把顺序反过来：先入队，再触发监听器，保证醒来一定取得到。“空事件不请求模型”的守卫是第二道保险，就算时序再错，最多是白醒一次，不会白花一次模型调用。
+
+类似的顺序问题还有一处：`模型请求> 第 N 次请求中...` 的提示必须在事件取用之后打印。写反了的症状很有迷惑性——终端打出“请求中”然后悄悄什么都没做，日志和行为矛盾。这类问题单看代码很难发现，是全量测试跑出来的。
+
+**定时终态进对话：修改 S12 的边界**
+
+S12 定过一条规则：“结果写回计划文件，不进对话”，理由是定时任务可能在用户离开很久后结束，往历史里塞没人看的通知只会撑大上下文。S15 改了这条规则，但保住了它的理由，靠两个限定：
+
+- **取消不送达**。取消只在会话结束时发生，那时没人需要这个结果；
+- **送达内容截断**。一行摘要（计划名、状态、耗时）加截断到 2000 字符的输出，经事件中心合并后以 `<system-events>` 标签进对话。
+
+送达的时机也不一样了：不是事件发生时硬插一条消息，而是放进 `EventHub` 的队列，由循环在**下一次请求前**取走——和 S11 的通知同一个时机。如果当时循环空闲，唤醒机制会让“下一次请求”立刻发生。
+
+**错误恢复：两类能救回来的失败**
+
+S01 定过边界：“失败不重试”。当时是对的——教学阶段先让失败路径简单可预测。但集成之后再看，失败要分三类：
+
+
+| 失败     | 例子                        | S15 的处理         |
+| ------ | ------------------------- | --------------- |
+| 瞬时不可用  | HTTP 429 限流、503/529 过载    | 按建议或指数退避重试      |
+| 请求本身太大 | 上下文超长（HTTP 400/413 配特定文案） | 先压缩再重试一次        |
+| 其他一切   | 超时、500、网络断开               | 和 S14 相同：报错结束本轮 |
+
+
+`OpenAiClient` 在非 2xx 时做分类：
+
+```java
+if (status == 429 || status == 503 || status == 529) {
+    return new ModelUnavailableException("模型接口返回 HTTP " + status
+            + (status == 429 ? "（限流）" : "（服务暂不可用）"), retryAfterSeconds(response));
+}
+if ((status == 400 || status == 413) && looksLikeContextOverflow(response.body())) {
+    return new ContextTooLargeException("模型接口返回 HTTP " + status + "（上下文超长）");
+}
+```
+
+限流的等待策略在 `ModelRetryPolicy`：服务商给了 `Retry-After` 就听它的（上限 60 秒），没给就指数退避 2s → 4s → 8s（上限 30 秒），默认最多重试 3 次。`Sleeper` 是个接口，测试注入一个记录延迟的实现，不用真的睡几秒。
+
+**上下文超长的恢复要小心一件事**。压缩不能只在辅助方法里做完就完事——压缩会替换整段历史，`turnStart`、Stop 事件的快照、后续步骤的请求全都建立在旧历史上，不同步过去协议就断了。所以恢复方法返回的不是 `ChatMessage`，而是一个带着新历史的记录：
+
+```java
+private record Recovery(ChatMessage answer, List<ChatMessage> history, List<ChatMessage> sent,
+                        boolean summarized) {
+}
+```
+
+调用方看到 `summarized` 就采纳新的历史，本轮从摘要消息算起——和 S08 阈值压缩的采纳逻辑完全一样，只是触发条件从“超过阈值”变成了“模型说放不下”。
+
+两条不变的纪律：错误响应的**正文不进异常消息**（里面可能有敏感信息，分类只看状态码和超长文案的关键词）；压缩不出摘要时**回退到普通失败**，不硬撑。重试耗尽也一样，最终行为和 S14 完全相同。
+
+**和其他机制的关系**
+
+
+| 机制       | 行为                                            |
+| -------- | --------------------------------------------- |
+| S01 循环   | 失败重试边界重新定义：仅限流可重试，其余仍一次失败结束本轮                 |
+| S03 权限   | 哨兵轮 ASK 自动拒绝；用户轮、队友确认照旧                       |
+| S04 Hook | 哨兵轮不触发 UserPromptSubmit，其余事件照常；事件送达不单独触发 Hook |
+| S05 提醒   | 哨兵轮同样计入清单提醒的批次计数                              |
+| S06/S13  | 子代理与队友没有事件中心；队友确认不受哨兵轮影响；团队模式 Lead 也会被事件唤醒    |
+| S08 压缩   | 新增 force 模式（不看阈值），阈值与 compact 行为不变            |
+| S11 后台   | 完成先入队再唤醒；结果送达语义不变                             |
+| S12 定时   | 非取消终态送达对话（边界修改）；取消只写文件                        |
+| S14 MCP  | 上一课入口逐字不变；HarnessMain 继承全部 MCP 能力             |
+
+
+**局限**
+
+- **唤醒轮里模型能做的事很有限**。不能确认就意味着写文件、Shell 都做不了，事件轮通常只能做总结、读取和汇报。这是设计使然：程序发起的轮次不该有用户不知情的副作用。
+- **每次后台完成都唤醒**。不区分事件重要性，十条后台任务就是十次唤醒。想合并，要等事件中心支持聚合。
+- **限流不区分错误类型**。配额耗尽和瞬时抖动用同一套退避，前者重试三次也只是浪费。
+- **没有 max_tokens 截断升级**。输出被截断（`finish_reason=length`）时直接报错，不像上下文超长那样有恢复路径。
+- **哨兵行是明文约定**。用户手动输入 `<system-events>` 也会被当作事件轮处理，好在行为等价（无事件时空转一次），没有副作用。
+- **空唤醒依赖守卫**。唤醒与入队在不同线程，时序错了靠“无事件不请求”兜底，最多白醒一次。
+
+想看效果：运行 `.\mvnw.cmd -pl s15 -q compile exec:java`，让模型“创建一个每分钟执行 `echo 阶段检查完成` 的计划”，确认后**不再输入任何内容**。到点观察三行输出：`计划> … 运行结束`（调度器）→ `事件> 已将程序事件交给模型`（循环被唤醒）→ 助手对结果的响应——全程没有用户输入。再让模型 `background_run` 一条 `sleep 5`，等 5 秒看后台结果同样唤醒循环。最后运行上一课入口 `-Dexec.mainClass=dev.learnagent.s15.app.McpMain` 重复第一个实验：到点只有 `计划>` 日志，循环纹丝不动——这就是 `options == null` 的含义。对照两条入口的系统提示词，除定时送达说明外逐字相同。
+
+# S16、Workflow Runtime 持久化工作流
+
+S15 把十四个机制接到了同一条循环上。但还有一类任务，前面的机制都没有真正解决：**步骤现在就能确定的多步任务**。比如发布流程："跑测试 → 写发布说明 → 更新版本号 → 打包"，顺序固定，不需要根据中间结果改变。
+
+用已有机制做，各有短板：
+
+
+| 做法               | 步骤记在哪     | 跨会话 | 谁来推进                       |
+| ---------------- | --------- | --- | -------------------------- |
+| S05 `todo_write` | 会话内存      | 否   | 模型照着清单自己走                  |
+| S06 `task`       | 对话历史里逐个派发 | 否   | 每次一个子代理，记账靠模型              |
+| S10 `.tasks/`    | 磁盘任务图     | 是   | 只存数据，模型手动 claim / complete |
+
+
+问题出在"记账"上。步骤顺序和每步结果散落在对话里，一旦被 S08 压缩，或者换了会话，"做到第几步、每步结果是什么"就没了。S10 虽然落了盘，但它只是数据，推进还是模型在对话里一步步来。
+
+S16 把"步骤序列"和"执行进度"都搬进文件，交给**运行时**执行：
+
+```text
+workflow_create(name, steps=[说明1, 说明2, 说明3])  →  .workflows/workflow_xxxxxxxx.json（pending）
+workflow_run(id)
+  ├─ 步骤 1：标记 running → 落盘 → 子代理执行 → 结果落盘
+  ├─ 步骤 2：标记 running → 落盘 → 子代理执行 → 结果落盘
+  └─ ……  任何一步之后进程都可以死掉，已完成的步骤不会重跑
+全部完成 → completed；某步失败 → failed；中断 → paused
+```
+
+![](agent-workflow.png)
+
+这是 durable execution 的最小教学版：**顺序确定、检查点落盘、断点续跑**。步骤本身仍然只是提示词，交给 S06 的子代理去执行，运行时不新增任何执行能力，只管编排和记账。`ChatLoop`、`SubagentRunner`、`ToolRegistry` 这一课都没有改。
+
+**不是所有任务都走工作流**
+
+先说清楚一件事：工作流不是"默认通道"，**是否使用由模型判断**，程序不做路由。它和 `task`、`todo_write` 一样，只是几个普通工具。判断依据只有两处软引导：系统提示词里的规则，和工具描述。
+
+```java
+public static final String RULE = "需要按固定顺序执行的多步任务（步骤现在就能确定、不需要根据中间结果改变顺序）"
+        + "用 workflow_create 声明为工作流：name 加有序的 steps，每步一句交给子代理的任务说明。"
+        + "workflow_run 从第一个未完成的步骤开始逐步执行，每步是一个独立子代理（看不到主对话），"
+        + "前序步骤的结果会自动附在后续步骤的说明里；每步完成后进度落盘，进程退出或步骤失败后再次 workflow_run"
+        + " 会从断点继续，失败的步骤会重跑、副作用可能重复，步骤说明尽量写成可重复执行。"
+        + ...
+```
+
+几类情况的取舍：
+
+
+| 任务                  | 更合适的做法             |
+| ------------------- | ------------------ |
+| 简单问答、一两步能做完         | 直接回答或直接调工具         |
+| 几步内做完、不用下次接着做       | `todo_write`       |
+| 只需要查清一件事            | `task` 子代理         |
+| 步骤要看中间结果才能决定下一步     | 模型在对话里自己推进，不适合预先声明 |
+| 顺序固定、步骤很多、可能中途停下再继续 | **工作流**            |
+| 有依赖图、要跨会话、可能多人认领    | S10 任务系统           |
+
+
+这条边界是软的：规则只是提示，模型可能该用没用，也可能小任务也建工作流，程序不会纠正。和 S10 的分工也不是硬边界。这也是为什么本课的练习要用真实模型观察它的取舍。
+
+**存储：文件是唯一数据源**
+
+沿用 S09 到 S12 的约定：`.workflows/workflow_xxxxxxxx.json`，ID 是 `workflow_` 加 8 位随机小写十六进制，排他创建；每次操作重读，修改先写临时文件再原子替换；读取不跟随符号链接，超过 64 KiB 或字段非法只告警跳过；最多 20 个工作流，每个最多 20 步。
+
+```json
+{
+  "id": "workflow_0a1b2c3d",
+  "name": "发布流程",
+  "status": "paused",
+  "steps": [
+    {"prompt": "运行测试并汇报结果", "status": "completed",
+     "result": "全部通过……", "startedAt": "…", "finishedAt": "…"},
+    {"prompt": "根据测试结果写发布说明", "status": "pending",
+     "result": null, "startedAt": null, "finishedAt": null}
+  ],
+  "createdAt": "…", "updatedAt": "…", "lastError": null
+}
+```
+
+状态机是本课的核心语义：
+
+```text
+工作流：pending ──run──→ running ──全部完成──→ completed
+             │              ├──某步失败──────→ failed ──run──→ 从失败步骤继续
+             │              └──中断/进程退出─→ paused ──run──→ 从断点继续
+             └──cancel────────────────────→ cancelled（终态）
+步骤：  pending ──开始──→ running ──成功──→ completed
+                              └──失败──→ failed（重跑时回到 pending）
+```
+
+两个枚举各带一个 `wireName` 和显示用的 `marker`，写法和 S10 的 `TaskStatus` 完全一样。
+
+文件可以手改，所以解析时要做**组合校验**，防止造出矛盾的状态：
+
+```java
+if (status == WorkflowStatus.PENDING && steps.stream().anyMatch(step -> step.status() != StepStatus.PENDING)) {
+    throw new IllegalArgumentException("pending 工作流不能有已开始的步骤");
+}
+if (status == WorkflowStatus.COMPLETED
+        && steps.stream().anyMatch(step -> step.status() != StepStatus.COMPLETED)) {
+    throw new IllegalArgumentException("completed 工作流的步骤必须全部完成");
+}
+if (status == WorkflowStatus.FAILED && lastError == null) {
+    throw new IllegalArgumentException("failed 工作流必须有 lastError");
+}
+```
+
+步骤也一样：completed 步骤必须有 `result`，pending 步骤不能带任何结果和时间，已开始的步骤必须有 `startedAt`。
+
+**启动修复**
+
+`workflow_run` 是同步执行的，进程在执行中被杀掉，文件里就留下 `running`。下一次启动时统一修复：
+
+```java
+WorkflowRecord fixed = new WorkflowRecord(workflow.id(), workflow.name(), WorkflowStatus.PAUSED,
+        steps, workflow.createdAt(), now, workflow.lastError());
+```
+
+其中处于 `running` 的步骤回到 `pending`，因为它是否执行完、做了多少都未知。重跑是工作流模型的根本语义，所以"失败的步骤会重跑、副作用可能重复"要写进系统提示词，提醒模型把步骤说明写成可重复执行。
+
+**执行：复用子代理，每步两个检查点**
+
+`WorkflowRunner.run(id)` 的主干很短：
+
+```java
+WorkflowRecord current = workflow.withStatus(WorkflowStatus.RUNNING, Instant.now(clock));
+store.save(current);
+int index = current.firstIncompleteIndex();
+while (index < current.steps().size()) {
+    current = executeStep(current, index);
+    if (current.status() == WorkflowStatus.FAILED) {
+        break;
+    }
+    index = current.firstIncompleteIndex();
+}
+```
+
+先检查状态：pending、paused、failed 可以运行；`running` 说明已有一次在执行，拒绝并发；`completed` 重跑等于整段重做，和断点续跑矛盾，拒绝；`cancelled` 是终态，拒绝。
+
+每个步骤的执行有四个要点：
+
+1. **开始检查点**。先标记 `running` 并落盘，再发起子代理。进程死在这里，最坏结果只是重复这一步。
+2. **复用 S06 的子代理**。每步新建历史、独立计数 `agent.max-model-calls`，步骤里的写文件和 Shell 照常逐次确认并经过 Hook。子代理还是组装点那一个 `SubagentRunner`，它的工具里没有 `workflow_*`，所以不会递归。
+3. **前序结果传递**。子代理看不到主对话，上一步的结果是它唯一的上下文来源：
+
+```java
+text.append("\n\n<前序步骤结果>\n").append(prior.toString().strip())
+        .append("\n</前序步骤结果>\n")
+        .append("以上是同一工作流中已完成步骤的输出，供本步骤参考；与本步骤无关时可以忽略。");
+```
+
+存储里每步结果最多保留 12000 字符，但**传递给下一步时每条只截 2000 字符**，否则 20 步全量传递会把子代理的上下文撑爆。
+
+4. **三种结束**：
+
+```java
+// 正常：started.finish(COMPLETED, 截断结果, now) → save
+// 失败：started.finish(FAILED, 说明, now) + lastError → save → 停止
+// 中断：started.reset() → 工作流 paused → save → 重新抛出
+```
+
+子代理正常回复，步骤 `completed`，结果落盘。模型请求失败，或者子代理达到调用上限，该步和整个工作流都标记 `failed` 并停止，`lastError` 记下原因。收到 `InterruptedException` 时，步骤回到 `pending`、工作流 `paused`，**先落盘再把异常抛出去**，顺序反了的话，`ChatLoop` 收到中断直接结束会话，`paused` 就没写进文件。
+
+**为什么失败要写进状态机，而不是变成工具错误？** `task` 的模型请求失败是转成工具错误交回主对话，"要不要重试"的记账在模型脑子里。工作流的记账在文件里：失败必须落成 `failed` 加 `lastError`，之后"修复了再次 `workflow_run`"才有断点可续。
+
+**工具与权限**
+
+五个工具：
+
+
+| 工具                               | 作用                                    | 权限    |
+| -------------------------------- | ------------------------------------- | ----- |
+| `workflow_create`                | 声明工作流，返回 ID 和步骤列表                     | ALLOW |
+| `workflow_run`                   | 从断点执行到结束或失败，返回每步状态与结果摘要               | ALLOW |
+| `workflow_list` / `workflow_get` | 一行摘要 / 完整 JSON                        | ALLOW |
+| `workflow_cancel`                | pending / paused / failed → cancelled | ALLOW |
+
+
+```java
+// S16：工作流工具只读写 .workflows 中的记录；步骤经子代理执行，与 task 相同，
+// 子代理的每次工具调用仍各自经过权限检查。
+case "workflow_create", "workflow_run", "workflow_list", "workflow_get", "workflow_cancel" ->
+        new Decision(Action.ALLOW, "只读写工作目录 .workflows 中的工作流；步骤经子代理执行，其工具调用另行检查权限。");
+```
+
+和 S06 的 `task` 是同一条逻辑：派发本身只是读写记录和发起模型请求，真正有副作用的写文件、Shell 都在步骤的子代理里，那一层照常要用户确认，绕不过权限。五个工具都经过 S04 的 Hook，用户可以拦截。
+
+注意 `workflow_run` 免确认并不意味着没有成本：每个步骤都是一次完整的子代理调用，一个 20 步的工作流可能产生几十次模型请求。如果想让用户在跑之前先看到完整步骤，可以把它改成逐次确认，改动只在 `PermissionPolicy` 一行。
+
+只有主 Agent（团队模式下是 Lead）有这五个工具，子代理和队友都没有，和后台、定时、MCP 是同一条边界。
+
+**怎么接进现有装配**
+
+工作流工具要用到组装点的 `SubagentRunner`，但 `TeamMain` 和 `ScheduleMain` 不应该硬编码它。这里沿用 S14 `McpManager.Starter` 的做法，加一个回调接口：
+
+```java
+@FunctionalInterface
+public interface WorkflowStarter {
+    /** binding.tools 追加到主 Agent 的工具末尾；binding.rule 追加到系统提示词。 */
+    WorkflowBinding bind(SubagentRunner runner, PrintWriter output);
+}
+```
+
+子代理运行器建好之后，装配代码调用 `bind` 拿到工具和规则：
+
+```java
+// S16：工作流步骤复用同一个子代理运行器；null 时与 S15 完全相同。
+WorkflowBinding workflow = workflows == null ? null : workflows.bind(runner, output);
+...
+if (workflow != null) {
+    extra.addAll(workflow.tools());
+}
+extra.addAll(mcp.tools());
+// 工作流规则附加在 MCP 规则之后；workflows 为 null 时提示词与 S15 逐字相同。
+String workflowSuffix = workflow == null ? "" : "\n\n" + workflow.rule();
+```
+
+`bind` 的实现里（`WorkflowStarter.of`）会在启动时做修复并打印统计：
+
+```text
+工作流> .workflows 中有 2 个工作流，已完成 1 个
+```
+
+和之前的课一样，旧的 `createSession` 重载一个都没删，逐层委托并传 `null`。**上一课入口 `app.HarnessMain` 行为和 S15 逐字相同**：26 个工具，没有 `workflow_*`，没有"工作流&gt;"日志，提示词也一样。这个"逐字相同"靠结构保证（null 时整条分支不触发），而不是靠自觉。
+
+**和其他机制的关系**
+
+
+| 机制       | 行为                                          |
+| -------- | ------------------------------------------- |
+| S03 权限   | 五个工作流工具直接放行；步骤里子代理的写入和 Shell 仍逐次确认          |
+| S04 Hook | 五个工具都触发 Pre / PostToolUse，可拦截；子代理内部的工具调用也经过 |
+| S05 清单   | 工作流是持久化的步骤序列，`todo_write` 仍是会话内的工作草稿，两者互不替代 |
+| S06 子代理  | 步骤执行直接复用 `SubagentRunner`；子代理没有工作流工具，不会递归   |
+| S08 压缩   | `workflow_run` 的结果是普通工具结果，可被微压缩；进度在文件里，压缩不丢 |
+| S10 任务系统 | 任务图是数据，由模型手动认领完成；工作流是执行，由运行时顺序推进            |
+| S13 团队   | 只有 Lead 有工作流工具，队友没有；团队模式下 Lead 共 35 个工具     |
+| S15 事件唤醒 | 工作流是同步执行，期间不处理事件；事件在 `workflow_run` 返回后照常送达 |
+
+
+**局限**
+
+- **线性序列**。没有分支、并行和条件。步骤要根据中间结果改变路线的任务，不适合预先声明。
+- **失败即停**。没有自动重试，修复是人的判断，然后再次 `workflow_run`。
+- **重跑会重复副作用**。写文件、发请求这类操作，被中断的那一步会再执行一遍，所以步骤说明要尽量写成幂等的。
+- **同步执行**。`workflow_run` 在调用线程上跑到结束，期间对话被占用；没有后台执行和自动续跑，续跑要靠用户或模型再次调用。
+- **没有删除**。`completed` 和 `cancelled` 是终态，文件保留供查阅，和任务系统"没有删除"是同一条理由。
+- **是否使用靠模型自觉**。规则只是提示，程序不会纠正选错的情况。
+
+想看效果：运行 `.\mvnw.cmd -pl s16 -q compile exec:java`，让模型"分两步：先统计 playground 里有多少个 txt 文件，再把结果写进 summary.txt"。观察 `workflow_create` 返回的步骤列表，和 `workflow_run` 执行时终端里的 `工作流> 步骤 1/2 开始执行`。第二步写文件时仍会出现权限确认。再试断点续跑：第二步执行中直接退出程序，重启后看到"已修复为 paused"，让模型 `workflow_list` 拿到 ID，再 `workflow_run`，第一步不会重跑。最后运行上一课入口 `-Dexec.mainClass=dev.learnagent.s16.app.HarnessMain`，同样的请求下模型没有工作流工具可用，只能用 `todo_write` 或 `task`。
+
+Workflow Runtime 的定位是"把顺序确定的多步任务，从模型的记忆里搬到文件里"。S10 管的是任务之间的依赖，S16 管的是一串步骤的执行进度。下一课 Goal Loop 要解决的是反过来的问题：目标是确定的，路径不确定，由谁来判断做完了没有。
