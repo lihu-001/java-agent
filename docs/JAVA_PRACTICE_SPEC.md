@@ -1,6 +1,6 @@
 # Java Agent 实战规范
 
-当前采用十六个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler；S13 Agent Teams；S14 MCP Plugin；S15 Integrated Harness；S16 Workflow Runtime。
+当前采用十七个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler；S13 Agent Teams；S14 MCP Plugin；S15 Integrated Harness；S16 Workflow Runtime；S17 Goal Loop。
 
 ## 模块边界
 
@@ -22,6 +22,7 @@
 | s14 | dev.learnagent.s14 / McpMain | `.agents/mcp.json` stdio MCP server、独立信任确认、工具发现与 `mcp__` 前缀、默认逐次确认 |
 | s15 | dev.learnagent.s15 / HarnessMain | 定时终态进对话、事件唤醒空闲循环（哨兵轮免交互确认）、限流退避重试、上下文超长响应式压缩 |
 | s16 | dev.learnagent.s16 / WorkflowMain | `.workflows/` 持久化工作流、五个 `workflow_*` 工具、逐步骤子代理执行、每步检查点与断点续跑 |
+| s17 | dev.learnagent.s17 / GoalMain | `/goal` 会话目标、无工具独立判断器、未完成同轮续跑、连续未完成与调用次数两道出口、后台与队友未结束时暂缓 |
 
 每课是前一课的源码快照加增量修改，拥有独立源码、测试、POM、配置示例、README。各模块不依赖其他课的 JAR 或源码，不使用共用 Java 核心。根 POM 为 packaging=pom，只聚合各课、管理依赖和插件版本。
 
@@ -65,6 +66,8 @@ S15 以 S14 完整源码为起点，新增 harness 包（TurnEvents、EventHub�
 
 S16 以 S15 完整源码为起点，新增 workflow 包（StepStatus、WorkflowStatus、WorkflowStep、WorkflowRecord、WorkflowStore、WorkflowRunner、WorkflowTools、WorkflowBinding、WorkflowStarter）和根包 WorkflowMain；S15 的 HarnessMain 移入 app，不接工作流，行为与 S15 默认入口完全相同。ChatLoop、SubagentRunner、ToolRegistry 不修改。工作流保存在工作目录 `.workflows/workflow_xxxxxxxx.json`（`workflow_` 加 8 位随机小写十六进制，排他创建），字段为 id、name、status、steps、createdAt、updatedAt、lastError；文件是唯一数据源，每次操作重读，修改经临时文件原子替换，文件 ≤64 KiB 严格 UTF-8、不跟随链接，无效文件告警跳过，最多 20 个工作流、每个最多 20 步（说明 ≤4000 字符，结果 ≤12000 字符）；根 `.gitignore` 忽略 `.workflows/`。解析做组合校验：pending 工作流步骤全部 pending，completed 工作流步骤全部完成且无 lastError，failed 必须有 lastError，completed 步骤必须有 result，已开始步骤必须有 startedAt。工作流状态为 pending/running/paused/completed/failed/cancelled，步骤状态为 pending/running/completed/failed。workflow_run 对 pending/paused/failed 的工作流从第一个未完成步骤开始顺序执行，running、completed、cancelled 拒绝；每步先标记 running 并落盘，再交给组装点同一个 SubagentRunner（每步新建历史、独立计数 agent.max-model-calls），前序已完成步骤的结果（每条截断 2000 字符）附在后续步骤说明的 `<前序步骤结果>` 中；步骤完成后结果落盘；模型请求失败或子代理达调用上限时步骤与工作流标记 failed 并停止，InterruptedException 时步骤回到 pending、工作流 paused 后重新抛出。启动时 repairAtStartup 把遗留 running 修复为 paused、其 running 步骤回到 pending。失败步骤重跑，副作用可能重复。workflow_cancel 把 pending/paused/failed 置为 cancelled（终态，幂等），running 与 completed 拒绝。工具参数：workflow_create 为 name（单行 ≤100 字符）与 steps，其余用 id，未知字段拒绝；输出超过 12000 字符截断。PermissionPolicy 对五个工具直接允许，均经过 PreToolUse/PostToolUse；步骤内子代理的写入与 Shell 仍逐次确认。只有主 Agent（团队模式为 Lead）有工作流工具，追加在 MCP 工具之前，系统提示词规则附在 MCP 规则之后；子代理与队友没有。ScheduleMain 与 TeamMain 新增带 WorkflowStarter 的 createSession 重载，旧重载逐层委托并传 null，null 时工具与提示词和 S15 逐字相同。Hook 配置固定为 `s16/.agents/hook.json`，技能目录为 `s16/.agents/skills`。详见 [S16 课程](lessons/s16-workflow-runtime.md)。
 
+S17 以 S16 完整源码为起点，新增 goal 包（GoalCommand、GoalState、GoalEvaluation、GoalEvaluator、GoalDecision、GoalController、GoalStarter）和根包 GoalMain；S16 的 WorkflowMain 移入 app，不接目标判断，行为与 S16 默认入口完全相同。本课不新增工具，SubagentRunner、ToolRegistry、PermissionPolicy 不修改；ChatLoop 新增带 GoalController 的构造方法，旧构造器逐层委托并传 null，null 时与 S16 完全相同。终端命令 `/goal <条件>` 设置或替换目标（去空白后 ≤4000 字符，超长时提示且不设置），`/goal` 查看（条件、判断次数、本轮连续未完成次数与上限、已用时间、最近理由），`/goal clear` 及别名 stop/off/reset/none/cancel（不区分大小写）清除；`/goals` 等不是命令。查看与清除不请求模型、不触发 Hook；设置时把条件包装为本轮任务，经 UserPromptSubmit 放行后才设置并记录为用户消息，被拒绝时目标不设置。每个会话同时只有一个目标，只在内存中，不跨会话。Goal Gate 位于无工具调用的结束位置：没有目标返回 ALLOW；运行中的手动后台命令、已完成未送达的后台结果或 WORKING 的队友使其返回 DEFER（不调用判断器、不计数，定时计划不算）；否则 GoalEvaluator 发出独立请求——不带工具、不经过 Hook、不计入每轮调用上限、不做限流重试，系统提示词为判断器专用，用户消息声明后续 JSON 是数据，包含 condition、omitted_messages 与 transcript（去掉主系统提示词，含 role、content、tool_calls 名称与参数；从最新完整消息往前取，预算 24000 字符，放不下的较早消息整条省略，最新一条单独超长时保留首尾各 4000 字符）。回复严格解析为 JSON 对象：ok 与 impossible 为布尔、reason 为非空字符串、两者不能同为 true，其他字段忽略，只容忍整段被一个代码块包住，理由超过 500 字符截断；格式不符、返回工具调用、请求失败均为 ERROR。ok 为 ACHIEVED、impossible 为 FAILED，两者清除目标；否则本轮连续未完成次数加一，不超过 `goal.block-cap`（默认 8，正整数）为 BLOCK，超过为 LIMIT。BLOCK 时主循环追加以 `[目标未完成]` 开头、附条件与理由的 user 消息，在同一轮 `continue`，共用 `agent.max-model-calls`，本轮视为已保存（之后失败不丢弃、通知不放回），续跑期间不触发 Stop；本轮调用次数已用完或处于 S15 哨兵轮时不写续跑消息，提示用户输入任意内容继续。其余决定结束本轮并照常触发 Stop；LIMIT 与 ERROR 保留目标交还用户。每轮开始清零连续次数，判断次数与理由保留；工具批达到调用上限时提示目标仍活跃。`goal.evaluator-model` 为空白时判断器与主 Agent 共用客户端，否则 GoalMain 以同一 base-url 与 api-key 单独构造。ScheduleMain 与 TeamMain 新增带 GoalStarter 的 createSession 重载，后台管理器（团队模式还有 TeamManager）就绪后 bind 得到控制器；只有主 Agent（团队模式为 Lead）有目标，系统提示词在工作流规则之后附 GoalController.RULE，子代理与队友没有；旧重载逐层委托并传 null，null 时工具与提示词和 S16 逐字相同。Hook 配置固定为 `s17/.agents/hook.json`，技能目录为 `s17/.agents/skills`。详见 [S17 课程](lessons/s17-goal-loop.md)。
+
 保留前一课的组装类便于代码对照；启动应使用各模块 POM 的默认入口。例如 s04 默认 HooksMain，直接手动运行保留的 app.ToolUseMain 不会启用权限和 Hook。
 
 ## 技术与目录
@@ -98,7 +101,7 @@ Shell 危险命令只作为待分类字符串；真实执行用无副作用命�
 
 ## 后续课程
 
-S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
+S17 为上游课程体系的最后一课。如需新增课，以当前前一课的完整源码为起点，保留已完成课程快照。
 
 ## 模块拆分验证
 
@@ -227,3 +230,11 @@ S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已�
 2026-10-27，Windows、JDK 17.0.2、Maven Wrapper 3.9.3（须显式指定 JAVA_HOME 为 JDK 17）。复制 S15 为 s16 并重命名包，HarnessMain 移入 app，新增 workflow 包与 WorkflowMain，父 POM 聚合 s16。根目录 `.\mvnw.cmd -B clean package` 十六模块全部成功：共 5797 项测试，5772 通过、25 项跳过，无失败或错误。S01—S15 源码与测试未改动，沿用上次的 5159 项；S16 共 638 项、636 通过、2 跳过（与 S15 相同的两项符号链接测试），新增 32 项（workflow 包 32 项，另在权限策略测试中补充五个工作流工具断言）覆盖：创建往返与校验不落盘、上限、无效文件告警跳过、原子替换、启动修复、组合状态校验；顺序执行与双检查点、前序结果传递与截断、模型失败与达上限转 failed、从失败步骤续跑不重跑已完成步骤、中断转 paused、拒绝运行 running/completed/cancelled；五个工具的参数校验与 cancel 生命周期；通过 TeamMain 的完整会话：31 个工具与规则、上一课入口 26 个工具且提示词逐字不变、create→run 免确认、失败后跨会话续跑、中断暂停、启动修复、Hook 拦截、团队模式 Lead 35 个工具而队友没有。首轮测试暴露三处测试数据构造错误（跳过 markRunning 直接 finish 被组合校验正确拒绝）和一处团队测试竞态（队友尚未请求主循环已退出，改为 CompletableFuture 等待后连跑 4 次稳定）。Windows 临时文件替换偶发 AccessDenied 与 S13—S15 记录相同，重跑通过。
 
 未用真实终端与真实模型验收：模型是否在合适时机选择工作流、步骤说明质量与断点续跑的实际体验需真实服务单独验收；Unix 分支未在本机执行。
+
+## S17 Goal Loop 验证
+
+2026-10-27，Windows、JDK 17.0.2、Maven Wrapper 3.9.3（须显式指定 JAVA_HOME 为 JDK 17）。复制 S16 为 s17 并重命名包，WorkflowMain 移入 app，新增 goal 包与 GoalMain，父 POM 聚合 s17。S17 共 702 项测试：638 项迁移自 S16，新增 64 项（goal 包 63 项，配置 1 项），覆盖：命令解析（查看、设置去空白、六个清除别名、非命令文本、4000 字符上限）；判断结果严格解析（代码块容忍、十二种格式错误、理由截断）；判断器不带工具、不含主系统提示词、指令性文字作为数据、预算内保留最近的完整消息、最新一条超长保留首尾、格式错误与工具调用转 IOException；控制器的 ALLOW/DEFER/ACHIEVED/FAILED/BLOCK/LIMIT/ERROR、新一轮清零、替换与清除、后台运行与未送达结果暂缓；通过 TeamMain 的完整会话：不新增工具（31 个）且规则附在最后、上一课入口提示词与 S16 逐字相同且 `/goal` 为普通提示词、BLOCK 续跑到达成且 Stop 只触发一次、连续上限交还用户并保留目标、调用上限用完不写续跑消息且下一轮恢复、命令不请求模型也不触发 Hook、Hook 拒绝时目标不设置、判断失败不续跑、后台运行中暂缓、哨兵轮不续跑、团队模式队友工作中暂缓且结果送达后判断达成、队友没有目标。新增测试首次运行全部通过。
+
+`.\mvnw.cmd -B -fae clean package`：S01—S15 全部成功，计数与上次一致（24/102/154/265/291/307/329/352/372/392/415/469/510/571/606）；S16 与 S17 在 `.workflows` 临时文件原子替换时报 `AccessDeniedException`（S16 两项失败、五项错误，S17 五项错误，均在 S16 原有的 workflow 测试中，goal 测试全部通过）。此前一次不带 `-fae` 的全量构建在未改动的 S15 `MemoryToolsTest` 上报同类错误。随后单独运行 `-pl s16,s17 test`：S17 共 702 项、700 通过、2 项符号链接权限跳过，无失败或错误；S16 仍有一项同类错误。单独运行 S17 期间，`WorkflowToolsTest`、`ScheduleStoreTest`、`WorkflowRunnerTest` 也各出现过一次同类错误，`ScheduleEventTest` 出现过一次 3 秒等待超时；把这些类单独再跑，33 项全部通过。这类错误本次比 S13—S16 记录的频繁，都发生在 S16 及之前就存在的文件存储代码中，未改动的 S16 同样复现，推测与杀毒或索引进程占用临时文件有关，本课没有修改相关代码。本次没有得到一次全部通过的全量构建；按模块计，十七课共 6499 项测试，S01—S15 与 S17 各自有完整通过的运行。
+
+在 s17 子工程用临时假配置直接运行 `GoalMain`（BOM-free 文件重定向输入 `/goal`、`/goal clear`、`exit`）：加载 2 个示例技能、记忆 0 条、任务 0 个、工作流 0 个、计划 0 个，横幅显示判断器模型与续跑上限，两条命令只打印目标状态，没有请求模型，正常退出；临时 config.properties 已删除，工作区没有残留文件。判断器在真实模型下的严格程度、续跑消息能否把主模型拉回正轨、事件轮与团队模式下的实际体验，需要用真实服务单独验收；Unix 分支未在本机执行。

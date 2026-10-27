@@ -1,6 +1,6 @@
 # Java Agent 逐课实战
 
-十六个独立 Maven 子工程，每课保存该阶段完整源码和测试。后续课程以前一课为基础修改、扩展，模块之间没有 Java 依赖；修改 S16 不会改变 S01—S15。根 POM 只聚合构建并统一 JDK、依赖和插件版本。
+十七个独立 Maven 子工程，每课保存该阶段完整源码和测试。后续课程以前一课为基础修改、扩展，模块之间没有 Java 依赖；修改 S17 不会改变 S01—S16。根 POM 只聚合构建并统一 JDK、依赖和插件版本。
 
 | 模块 | 本课能力 | 相较上一课新增 | 默认入口 |
 | --- | --- | --- | --- |
@@ -20,6 +20,7 @@
 | [s14](s14/README.md) | MCP Plugin 外部工具接入 | `.agents/mcp.json` 配置 stdio MCP server、独立信任确认、JSON-RPC 握手与工具发现、`mcp__<server>__<tool>` 默认逐次确认 | `dev.learnagent.s14.McpMain` |
 | [s15](s15/README.md) | Integrated Harness 集成运行时 | 定时终态进对话、事件唤醒空闲循环（哨兵轮免交互确认）、429/503/529 退避重试、上下文超长响应式压缩 | `dev.learnagent.s15.HarnessMain` |
 | [s16](s16/README.md) | Workflow Runtime 持久化工作流 | `.workflows/` 工作流文件、五个 `workflow_*` 工具、逐步骤子代理执行、每步检查点落盘、断点续跑 | `dev.learnagent.s16.WorkflowMain` |
+| [s17](s17/README.md) | Goal Loop 目标循环 | `/goal` 设置完成条件、无工具的独立判断器、未完成时自动续跑、连续未完成与调用次数两道出口、后台与队友未结束时暂缓判断 | `dev.learnagent.s17.GoalMain` |
 
 每课的全部 Java 类位于自己的 `dev.learnagent.s0N` 包及子包，阅读时无需跳到其他模块。S04 已按配置、循环、模型、工具、权限和 Hook 分包，结构见 [S04 README](s04/README.md)。重复源码是用于对照学习的阶段快照，没有额外 common 模块。
 
@@ -44,6 +45,7 @@ s13/                            # 基于 S12 增加 Agent Teams
 s14/                            # 基于 S13 增加 MCP Plugin
 s15/                            # 基于 S14 集成 Harness：事件唤醒、限流退避、响应式压缩
 s16/                            # 基于 S15 增加 Workflow Runtime：持久化工作流与断点续跑
+s17/                            # 基于 S16 增加 Goal Loop：独立判断完成条件与自动续跑
   pom.xml                       # 各模块都有独立 POM
   README.md                     # 范围、增量说明和阅读顺序
   config.example.properties     # 配置示例
@@ -97,6 +99,7 @@ docs/history/                   # 拆分前的验证记录
 .\mvnw.cmd -pl s14 -q compile exec:java
 .\mvnw.cmd -pl s15 -q compile exec:java
 .\mvnw.cmd -pl s16 -q compile exec:java
+.\mvnw.cmd -pl s17 -q compile exec:java
 ```
 
 根工程不再包含应用入口，启动时必须选课。各模块生成自己的普通 JAR，使用 `exec:java` 加载依赖运行。
@@ -126,28 +129,30 @@ openai.api-key=你的密钥
 
 | 配置项 | 使用范围 | 默认值 |
 | --- | --- | --- |
-| `openai.base-url` | S01—S16，程序追加 `/chat/completions` | `https://api.openai.com/v1` |
-| `openai.model` | S01—S16 | 必填 |
-| `openai.api-key` | S01—S16 | 必填，仅本地文件 |
-| `agent.work-dir` | S02—S16 | `playground`，相对进程工作目录 |
-| `agent.max-model-calls` | S02—S16，每轮模型请求上限；S06 子代理每次 `task` 单独计数，S16 工作流每步单独计数；S13 每个队友每轮单独计数，S08 起总结请求不计入 | `10` |
-| `shell.timeout-seconds` | S02—S16 | `30` |
-| `shell.max-output-chars` | S02—S16 | `12000` |
-| `compact.threshold-chars` | S08—S16，对话粗略字符数超过时自动总结 | `50000` |
-| `compact.keep-tool-results` | S08—S16，微压缩保留原文的最近工具结果数 | `3` |
-| `background.timeout-seconds` | S11—S16，后台命令与定时命令的超时 | `600` |
-| `scheduler.poll-seconds` | S12—S16，调度线程轮询间隔；计划本身最短一分钟 | `15` |
-| `team.enabled` | S13—S16，团队模式开关，只接受 true/false；关闭时与 S12 相同 | `false` |
+| `openai.base-url` | S01—S17，程序追加 `/chat/completions` | `https://api.openai.com/v1` |
+| `openai.model` | S01—S17 | 必填 |
+| `openai.api-key` | S01—S17 | 必填，仅本地文件 |
+| `agent.work-dir` | S02—S17 | `playground`，相对进程工作目录 |
+| `agent.max-model-calls` | S02—S17，每轮模型请求上限；S06 子代理每次 `task` 单独计数，S16 工作流每步单独计数；S13 每个队友每轮单独计数，S08 起总结请求不计入；S17 自动续跑与正常调用共用本轮上限，判断请求不计入 | `10` |
+| `shell.timeout-seconds` | S02—S17 | `30` |
+| `shell.max-output-chars` | S02—S17 | `12000` |
+| `compact.threshold-chars` | S08—S17，对话粗略字符数超过时自动总结 | `50000` |
+| `compact.keep-tool-results` | S08—S17，微压缩保留原文的最近工具结果数 | `3` |
+| `background.timeout-seconds` | S11—S17，后台命令与定时命令的超时 | `600` |
+| `scheduler.poll-seconds` | S12—S17，调度线程轮询间隔；计划本身最短一分钟 | `15` |
+| `team.enabled` | S13—S17，团队模式开关，只接受 true/false；关闭时与 S12 相同 | `false` |
+| `goal.block-cap` | S17，一轮内判断器连续认为未完成时最多自动续跑的次数，超过后交还用户 | `8` |
+| `goal.evaluator-model` | S17，判断器使用的模型（同一 base-url 与 api-key） | 空，与 `openai.model` 相同 |
 
 S01 只使用前三项，每次有效输入只请求模型一次，不声明工具、不执行命令。所有课程使用非流式 Chat Completions，模型请求超时 60 秒；输入 `exit`、`quit` 或 EOF 退出。
 
-S02 提供 `shell`、`read_file`、`write_file`、`edit_file`、`glob`；S03 加入逐次权限确认；S04 加入 `UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop`。`Stop` 仅表示本轮正常最终回复，超限、失败、中断和退出不触发。S05 增加第六个工具 `todo_write`：模型提交完整任务清单，程序在内存中校验保存；连续 3 批工具调用未更新且有未完成项时，在最后一个工具结果后附加提醒。它免逐次确认，但仍经过 Hook。S06 增加第七个工具 `task`：子代理以全新消息历史独立完成子任务，只把总结交回主对话；子代理只有五个基础工具，不能再派生子代理，其工具调用仍逐次确认并经过 Hook。S07 增加第八个工具 `load_skill`：启动时扫描 `s07/.agents/skills/*/SKILL.md`，系统提示词只列技能名称和描述，模型需要时加载完整正文；它免逐次确认但经过 Hook，子代理也可加载技能。S08 增加第九个工具 `compact` 与请求前的上下文压缩：较早的长工具结果以占位说明代替；对话超过阈值或模型调用 `compact` 时，先把完整记录保存到工作目录 `.transcripts/`，再请模型总结，历史替换为系统提示词加摘要，任务清单与最新用户输入原样附加。S09 增加三个记忆工具：模型把以后仍有用的偏好、纠正和项目背景保存为工作目录 `.memory/<name>.md`，下次启动时名称与描述组成的索引进入系统提示词，正文用 `memory_read` 按需读取；读取免确认，保存和删除逐次确认，均经过 Hook，子代理没有记忆工具。S10 增加六个任务工具：`task_create` 创建任务、`task_update` 用返回的 ID 追加 `blockedBy` 依赖（拒绝自身依赖与环）、`task_claim` 在依赖全部完成后认领、`task_complete` 完成并报告解锁的下游、`task_list` / `task_get` 查看；任务保存为工作目录 `.tasks/task_xxxxxxxx.json`，跨会话保留，内容不进系统提示词。它们免逐次确认但经过 Hook，子代理没有任务工具。S11 增加两个后台工具：`background_run` 把耗时命令放到后台线程执行并立即返回 `bg_N`，模型可以继续做别的事；命令结束后，结果以 `<background-results>` 附加到下一次请求模型时的最后一条消息，不需要轮询，`background_check` 查看状态和完整输出。`background_run` 与 `shell` 共用硬拒绝和逐次确认，超时单独配置；后台任务只在本次会话中，退出时终止仍在运行的命令，子代理没有后台工具。S12 增加六个定时计划工具：`schedule_create(name, cron, command)` 用五段 cron 登记一条到点执行的 Shell 命令，`schedule_list` / `schedule_get` 查看状态和上次输出，`schedule_pause` / `schedule_resume` 暂停和恢复，`schedule_delete` 删除。计划保存为工作目录 `.schedules/schedule_xxxxxxxx.json`，跨会话保留，但只有本程序运行期间才会触发，进程没运行时错过的时点不补跑；到点命令交给后台执行，同一计划上一次未结束时跳过本次时点，结果写回计划文件而不进入对话通知。创建时按 `shell` 规则确认一次，之后无人值守执行；`schedule_create` 共用硬拒绝规则，查询与暂停免确认，恢复和删除逐次确认，均经过 Hook，子代理没有定时工具。S13 增加团队模式，默认关闭，`team.enabled=true` 才启用，关闭时与 S12 完全相同。开启后增加四个团队工具：Lead 用 `spawn_teammate` 创建最多 4 个常驻队友（逐次确认），每个队友是独立线程上的完整 Agent，有自己的历史和任务清单；`send_message` 给 lead 或任何队友发消息，写入工作目录 `.mailboxes/<name>.jsonl`，对方下一轮前自动收到，`list_teammates` 查看状态，`shutdown_teammate` 请求关闭。主线程是唯一读取用户输入的线程：队友每轮的结果作为 `<team-events>` 在没有用户输入时也会唤醒 Lead，队友需要确认的工具调用排队到主终端询问。队友空闲时在锁内自动认领 `.tasks/` 中可开始的任务，一次只持有一个，退出时退回未完成的任务；队友没有后台、定时、记忆写入和团队管理工具。`agent.work-dir` 是 git 仓库根时，`spawn_teammate` 可传 `worktree=true`，让队友在自己的 `.worktrees/<name>`（分支 `wt/<name>`）中工作，Lead 合并其分支。S14 接入外部 MCP server：启动时读取 `s14/.agents/mcp.json`（默认没有，此时与 S13 完全相同），经独立于 Hook 的信任确认后，以子进程启动每个 stdio server，不经过 Shell；完成 `initialize` 握手后用 `tools/list` 发现工具，包装为 `mcp__<server>__<tool>`。这些工具与内置工具一样经过 Hook 和权限检查，默认逐次确认，`allow` 中列出的工具免确认；只有主 Agent（团队模式下为 Lead）拥有，子代理和队友没有。会话结束时关闭全部 server。S15 是集成课：默认入口 `HarnessMain` 把全部机制运行在同一条循环上——定时计划的运行结束（除会话结束导致的取消）以 `<system-events>` 送达对话，后台完成与定时结束会唤醒空闲的循环；程序自动发起的哨兵轮不记录用户消息、不触发提示词钩子，也不能交互确认（ASK 直接拒绝）。模型请求被限流（HTTP 429/503/529）时按 `Retry-After` 或指数退避最多重试 3 次；上下文超长时先自动总结一次再重试。上一课入口 `McpMain` 行为与 S14 完全相同。S16 增加五个工作流工具：`workflow_create(name, steps)` 把有序的提示词步骤声明为持久化工作流，`workflow_run` 从第一个未完成的步骤开始逐步执行——每步是一个独立子代理，前序步骤的结果自动附在后续步骤的说明里，每步完成即保存进度；`workflow_list` / `workflow_get` 查看进度，`workflow_cancel` 取消。工作流保存为工作目录 `.workflows/workflow_xxxxxxxx.json`，跨会话保留；进程退出或步骤失败后再次 `workflow_run` 从断点继续，失败的步骤会重跑、副作用可能重复；全部免逐次确认但经过 Hook，子代理与队友没有工作流工具。上一课入口 `HarnessMain`（`s16` 的 `app` 包）不接工作流，行为与 S15 完全相同。
+S02 提供 `shell`、`read_file`、`write_file`、`edit_file`、`glob`；S03 加入逐次权限确认；S04 加入 `UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop`。`Stop` 仅表示本轮正常最终回复，超限、失败、中断和退出不触发。S05 增加第六个工具 `todo_write`：模型提交完整任务清单，程序在内存中校验保存；连续 3 批工具调用未更新且有未完成项时，在最后一个工具结果后附加提醒。它免逐次确认，但仍经过 Hook。S06 增加第七个工具 `task`：子代理以全新消息历史独立完成子任务，只把总结交回主对话；子代理只有五个基础工具，不能再派生子代理，其工具调用仍逐次确认并经过 Hook。S07 增加第八个工具 `load_skill`：启动时扫描 `s07/.agents/skills/*/SKILL.md`，系统提示词只列技能名称和描述，模型需要时加载完整正文；它免逐次确认但经过 Hook，子代理也可加载技能。S08 增加第九个工具 `compact` 与请求前的上下文压缩：较早的长工具结果以占位说明代替；对话超过阈值或模型调用 `compact` 时，先把完整记录保存到工作目录 `.transcripts/`，再请模型总结，历史替换为系统提示词加摘要，任务清单与最新用户输入原样附加。S09 增加三个记忆工具：模型把以后仍有用的偏好、纠正和项目背景保存为工作目录 `.memory/<name>.md`，下次启动时名称与描述组成的索引进入系统提示词，正文用 `memory_read` 按需读取；读取免确认，保存和删除逐次确认，均经过 Hook，子代理没有记忆工具。S10 增加六个任务工具：`task_create` 创建任务、`task_update` 用返回的 ID 追加 `blockedBy` 依赖（拒绝自身依赖与环）、`task_claim` 在依赖全部完成后认领、`task_complete` 完成并报告解锁的下游、`task_list` / `task_get` 查看；任务保存为工作目录 `.tasks/task_xxxxxxxx.json`，跨会话保留，内容不进系统提示词。它们免逐次确认但经过 Hook，子代理没有任务工具。S11 增加两个后台工具：`background_run` 把耗时命令放到后台线程执行并立即返回 `bg_N`，模型可以继续做别的事；命令结束后，结果以 `<background-results>` 附加到下一次请求模型时的最后一条消息，不需要轮询，`background_check` 查看状态和完整输出。`background_run` 与 `shell` 共用硬拒绝和逐次确认，超时单独配置；后台任务只在本次会话中，退出时终止仍在运行的命令，子代理没有后台工具。S12 增加六个定时计划工具：`schedule_create(name, cron, command)` 用五段 cron 登记一条到点执行的 Shell 命令，`schedule_list` / `schedule_get` 查看状态和上次输出，`schedule_pause` / `schedule_resume` 暂停和恢复，`schedule_delete` 删除。计划保存为工作目录 `.schedules/schedule_xxxxxxxx.json`，跨会话保留，但只有本程序运行期间才会触发，进程没运行时错过的时点不补跑；到点命令交给后台执行，同一计划上一次未结束时跳过本次时点，结果写回计划文件而不进入对话通知。创建时按 `shell` 规则确认一次，之后无人值守执行；`schedule_create` 共用硬拒绝规则，查询与暂停免确认，恢复和删除逐次确认，均经过 Hook，子代理没有定时工具。S13 增加团队模式，默认关闭，`team.enabled=true` 才启用，关闭时与 S12 完全相同。开启后增加四个团队工具：Lead 用 `spawn_teammate` 创建最多 4 个常驻队友（逐次确认），每个队友是独立线程上的完整 Agent，有自己的历史和任务清单；`send_message` 给 lead 或任何队友发消息，写入工作目录 `.mailboxes/<name>.jsonl`，对方下一轮前自动收到，`list_teammates` 查看状态，`shutdown_teammate` 请求关闭。主线程是唯一读取用户输入的线程：队友每轮的结果作为 `<team-events>` 在没有用户输入时也会唤醒 Lead，队友需要确认的工具调用排队到主终端询问。队友空闲时在锁内自动认领 `.tasks/` 中可开始的任务，一次只持有一个，退出时退回未完成的任务；队友没有后台、定时、记忆写入和团队管理工具。`agent.work-dir` 是 git 仓库根时，`spawn_teammate` 可传 `worktree=true`，让队友在自己的 `.worktrees/<name>`（分支 `wt/<name>`）中工作，Lead 合并其分支。S14 接入外部 MCP server：启动时读取 `s14/.agents/mcp.json`（默认没有，此时与 S13 完全相同），经独立于 Hook 的信任确认后，以子进程启动每个 stdio server，不经过 Shell；完成 `initialize` 握手后用 `tools/list` 发现工具，包装为 `mcp__<server>__<tool>`。这些工具与内置工具一样经过 Hook 和权限检查，默认逐次确认，`allow` 中列出的工具免确认；只有主 Agent（团队模式下为 Lead）拥有，子代理和队友没有。会话结束时关闭全部 server。S15 是集成课：默认入口 `HarnessMain` 把全部机制运行在同一条循环上——定时计划的运行结束（除会话结束导致的取消）以 `<system-events>` 送达对话，后台完成与定时结束会唤醒空闲的循环；程序自动发起的哨兵轮不记录用户消息、不触发提示词钩子，也不能交互确认（ASK 直接拒绝）。模型请求被限流（HTTP 429/503/529）时按 `Retry-After` 或指数退避最多重试 3 次；上下文超长时先自动总结一次再重试。上一课入口 `McpMain` 行为与 S14 完全相同。S16 增加五个工作流工具：`workflow_create(name, steps)` 把有序的提示词步骤声明为持久化工作流，`workflow_run` 从第一个未完成的步骤开始逐步执行——每步是一个独立子代理，前序步骤的结果自动附在后续步骤的说明里，每步完成即保存进度；`workflow_list` / `workflow_get` 查看进度，`workflow_cancel` 取消。工作流保存为工作目录 `.workflows/workflow_xxxxxxxx.json`，跨会话保留；进程退出或步骤失败后再次 `workflow_run` 从断点继续，失败的步骤会重跑、副作用可能重复；全部免逐次确认但经过 Hook，子代理与队友没有工作流工具。上一课入口 `HarnessMain`（`s16` 的 `app` 包）不接工作流，行为与 S15 完全相同。S17 增加 Goal Loop：用户输入 `/goal <完成条件>` 设置会话目标并立即开始，`/goal` 查看、`/goal clear` 清除。有目标时，模型每次不再调用工具，程序都会先请一个不带工具的独立判断器阅读对话记录、判断条件是否满足；未满足就把理由作为 `[目标未完成]` 消息写回对话，同一轮内自动续跑，满足或判定无法完成时清除目标。自动续跑有两道出口：本轮模型调用上限与 `goal.block-cap`（默认 8），达到上限或判断器失败时交还用户、保留目标，不伪装成完成；后台命令或队友仍在工作时暂缓判断，程序事件轮不自动续跑。本课不新增工具，只有主 Agent（团队模式为 Lead）有目标；目标不跨会话。上一课入口 `WorkflowMain`（`s17` 的 `app` 包）行为与 S16 完全相同。
 
 S04 的 Java Hook 是 Agent 内置行为，JSON Hook 是用户扩展，两者同时生效。注册顺序为内置日志、追加的 Java Hook、用户 JSON 命令。无论从哪里启动，都读取 S04 子项目下的 `s04/.agents/hook.json`，不读取父工程配置；命令通过 stdin 接收事件 JSON，前置可拦截，后置失败只告警。命令固定在 S04 目录运行，修改配置后重启。完整用法见 [S04 README](s04/README.md#json-配置-hook)。
 
 用户命令 Hook 首次启用或配置/脚本内容变化时独立询问信任：`y` 信任并记住、`once` 仅本次、其他输入或 EOF 不启用。授权保存在用户目录 `~/.java-agent/hook-trust/`，拒绝不影响内置 Java Hook；运行中检测到内容变化会停止用户 Hook。该授权与 S03 工具审批独立，也不是命令安全审计或沙箱。
 
-Windows Shell 使用 PowerShell，Unix 使用 `/bin/sh`。Shell 仍具有当前用户权限，工作区与文本规则不是系统沙箱。详细契约与练习见 [S01](docs/lessons/s01-agent-loop.md)、[S02](docs/lessons/s02-tool-use.md)、[S03](docs/lessons/s03-permission.md)、[S04](docs/lessons/s04-hooks.md)、[S05](docs/lessons/s05-todo-write.md)、[S06](docs/lessons/s06-subagent.md)、[S07](docs/lessons/s07-skill-loading.md)、[S08](docs/lessons/s08-context-compact.md)、[S09](docs/lessons/s09-memory.md)、[S10](docs/lessons/s10-task-system.md)、[S11](docs/lessons/s11-background-tasks.md)、[S12](docs/lessons/s12-cron-scheduler.md)、[S13](docs/lessons/s13-agent-teams.md)、[S14](docs/lessons/s14-mcp-plugin.md)、[S15](docs/lessons/s15-integrated-harness.md)、[S16](docs/lessons/s16-workflow-runtime.md)。
+Windows Shell 使用 PowerShell，Unix 使用 `/bin/sh`。Shell 仍具有当前用户权限，工作区与文本规则不是系统沙箱。详细契约与练习见 [S01](docs/lessons/s01-agent-loop.md)、[S02](docs/lessons/s02-tool-use.md)、[S03](docs/lessons/s03-permission.md)、[S04](docs/lessons/s04-hooks.md)、[S05](docs/lessons/s05-todo-write.md)、[S06](docs/lessons/s06-subagent.md)、[S07](docs/lessons/s07-skill-loading.md)、[S08](docs/lessons/s08-context-compact.md)、[S09](docs/lessons/s09-memory.md)、[S10](docs/lessons/s10-task-system.md)、[S11](docs/lessons/s11-background-tasks.md)、[S12](docs/lessons/s12-cron-scheduler.md)、[S13](docs/lessons/s13-agent-teams.md)、[S14](docs/lessons/s14-mcp-plugin.md)、[S15](docs/lessons/s15-integrated-harness.md)、[S16](docs/lessons/s16-workflow-runtime.md)、[S17](docs/lessons/s17-goal-loop.md)。
 
 ## 验证记录
 
