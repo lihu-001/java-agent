@@ -1,6 +1,6 @@
 # Java Agent 实战规范
 
-当前采用十五个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler；S13 Agent Teams；S14 MCP Plugin；S15 Integrated Harness。
+当前采用十六个独立 Maven 子工程。课次边界以用户重新定义为准：S01 最小文本对话 Loop，不含工具；S02 工具及多工具；S03 权限；S04 Hook；S05 TodoWrite；S06 Subagent；S07 Skill Loading；S08 Context Compact；S09 Memory；S10 Task System；S11 Background Tasks；S12 Cron Scheduler；S13 Agent Teams；S14 MCP Plugin；S15 Integrated Harness；S16 Workflow Runtime。
 
 ## 模块边界
 
@@ -21,6 +21,7 @@
 | s13 | dev.learnagent.s13 / TeamMain | 常驻队友线程、`.mailboxes/` 收件箱、任务锁内认领、主线程统一确认 |
 | s14 | dev.learnagent.s14 / McpMain | `.agents/mcp.json` stdio MCP server、独立信任确认、工具发现与 `mcp__` 前缀、默认逐次确认 |
 | s15 | dev.learnagent.s15 / HarnessMain | 定时终态进对话、事件唤醒空闲循环（哨兵轮免交互确认）、限流退避重试、上下文超长响应式压缩 |
+| s16 | dev.learnagent.s16 / WorkflowMain | `.workflows/` 持久化工作流、五个 `workflow_*` 工具、逐步骤子代理执行、每步检查点与断点续跑 |
 
 每课是前一课的源码快照加增量修改，拥有独立源码、测试、POM、配置示例、README。各模块不依赖其他课的 JAR 或源码，不使用共用 Java 核心。根 POM 为 packaging=pom，只聚合各课、管理依赖和插件版本。
 
@@ -62,6 +63,8 @@ S14 以 S13 完整源码为起点，新增 mcp 包（McpConfig、McpTrustSnapsho
 
 S15 以 S14 完整源码为起点，新增 harness 包（TurnEvents、EventHub、AgentConsole、ModelRetryPolicy、HarnessOptions）和根包 HarnessMain；S14 的 McpMain 移入 app，行为与 S14 完全相同。本课不新增独立机制，只做集成与错误恢复。事件唤醒：ScheduleManager 新增带事件出口的构造方法，非取消终态把一行摘要（含计划名、状态、耗时与截断输出）发给 EventHub，取消（会话结束）不发送；BackgroundManager 改为先入队再触发完成监听器并新增 hasQueuedNotifications，来源非空或取消的完成结果由装配层只触发唤醒。哨兵轮：控制台在空闲时被 EventHub 监听者唤醒，以哨兵行 `<system-events>` 进入一轮；该轮不记录用户消息、不触发 UserPromptSubmit、待送达事件合并渲染（定时在前、后台 `<background-results>` 在后）作为一条新 user 消息进入，没有事件时不请求模型；轮次期间 EventHub.setSyntheticTurn(true)，PermissionGate 新增带 BooleanSupplier 的构造方法对 ASK 立即拒绝（用户可能不在终端），队友确认仍排队交主线程。通知送达语义不变：附加到最后一条 user/tool 消息末尾（哨兵轮历史尾部无 user/tool 时作为新 user 消息）、不新增角色、只送达一次、本轮未保存时按原队列放回。错误恢复：OpenAiClient 把 429/503/529 映射为 ModelUnavailableException（读取 Retry-After 数字秒，HTTP-date 不支持），400/413 且正文匹配常见超长文案映射为 ContextTooLargeException，错误正文不进入异常消息；ModelRetryPolicy 按 Retry-After（上限 60 秒）或指数退避（2s→4s→8s，上限 30 秒）重试，默认最多 3 次，Sleeper 可注入；上下文超长用 ContextCompactor 新增的 force 重载立即总结一次并重试，压缩不出摘要时按普通失败处理，重试耗尽与 S14 失败路径相同（未保存时丢弃本轮并放回事件）。HarnessOptions(events, retry, loopInput) 为 null 时全部增强关闭；ChatLoop 新增带 EventHub 与 ModelRetryPolicy 的构造方法，旧重载逐层委托全部保留；TeamConsole.prompts 增加 hub 重载（队友消息优先于程序事件），TeamMain 与 ScheduleMain 新增带 options 的 createSession 重载接线事件中心、后台完成唤醒、哨兵轮免确认与退避。关闭顺序不变：拒绝待定确认 → 停队友 → background.shutdown（停调度器并取消命令）→ 关 MCP server。团队模式与单 Agent 共用同一套增强。Hook 配置固定为 `s15/.agents/hook.json`，技能目录为 `s15/.agents/skills`。详见 [S15 课程](lessons/s15-integrated-harness.md)。
 
+S16 以 S15 完整源码为起点，新增 workflow 包（StepStatus、WorkflowStatus、WorkflowStep、WorkflowRecord、WorkflowStore、WorkflowRunner、WorkflowTools、WorkflowBinding、WorkflowStarter）和根包 WorkflowMain；S15 的 HarnessMain 移入 app，不接工作流，行为与 S15 默认入口完全相同。ChatLoop、SubagentRunner、ToolRegistry 不修改。工作流保存在工作目录 `.workflows/workflow_xxxxxxxx.json`（`workflow_` 加 8 位随机小写十六进制，排他创建），字段为 id、name、status、steps、createdAt、updatedAt、lastError；文件是唯一数据源，每次操作重读，修改经临时文件原子替换，文件 ≤64 KiB 严格 UTF-8、不跟随链接，无效文件告警跳过，最多 20 个工作流、每个最多 20 步（说明 ≤4000 字符，结果 ≤12000 字符）；根 `.gitignore` 忽略 `.workflows/`。解析做组合校验：pending 工作流步骤全部 pending，completed 工作流步骤全部完成且无 lastError，failed 必须有 lastError，completed 步骤必须有 result，已开始步骤必须有 startedAt。工作流状态为 pending/running/paused/completed/failed/cancelled，步骤状态为 pending/running/completed/failed。workflow_run 对 pending/paused/failed 的工作流从第一个未完成步骤开始顺序执行，running、completed、cancelled 拒绝；每步先标记 running 并落盘，再交给组装点同一个 SubagentRunner（每步新建历史、独立计数 agent.max-model-calls），前序已完成步骤的结果（每条截断 2000 字符）附在后续步骤说明的 `<前序步骤结果>` 中；步骤完成后结果落盘；模型请求失败或子代理达调用上限时步骤与工作流标记 failed 并停止，InterruptedException 时步骤回到 pending、工作流 paused 后重新抛出。启动时 repairAtStartup 把遗留 running 修复为 paused、其 running 步骤回到 pending。失败步骤重跑，副作用可能重复。workflow_cancel 把 pending/paused/failed 置为 cancelled（终态，幂等），running 与 completed 拒绝。工具参数：workflow_create 为 name（单行 ≤100 字符）与 steps，其余用 id，未知字段拒绝；输出超过 12000 字符截断。PermissionPolicy 对五个工具直接允许，均经过 PreToolUse/PostToolUse；步骤内子代理的写入与 Shell 仍逐次确认。只有主 Agent（团队模式为 Lead）有工作流工具，追加在 MCP 工具之前，系统提示词规则附在 MCP 规则之后；子代理与队友没有。ScheduleMain 与 TeamMain 新增带 WorkflowStarter 的 createSession 重载，旧重载逐层委托并传 null，null 时工具与提示词和 S15 逐字相同。Hook 配置固定为 `s16/.agents/hook.json`，技能目录为 `s16/.agents/skills`。详见 [S16 课程](lessons/s16-workflow-runtime.md)。
+
 保留前一课的组装类便于代码对照；启动应使用各模块 POM 的默认入口。例如 s04 默认 HooksMain，直接手动运行保留的 app.ToolUseMain 不会启用权限和 Hook。
 
 ## 技术与目录
@@ -95,7 +98,7 @@ Shell 危险命令只作为待分类字符串；真实执行用无副作用命�
 
 ## 后续课程
 
-S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
+S17 Goal Loop。新增课以当前前一课的完整源码为起点，保留已完成课程快照。
 
 ## 模块拆分验证
 
@@ -218,3 +221,9 @@ S16 Workflow Runtime、S17 Goal Loop。新增课以当前前一课的完整源�
 首次全量构建抓到 TeamConsoleWakeTest 的真实竞态：第二阶段未模拟 ChatLoop 取走事件，`hub.hasPending()` 残留导致哨兵行抢先返回；修正为哨兵轮后清空事件中心（与真实消费时序一致），连跑 5 次测试类稳定通过后第三次全量构建全部通过。同一次失败构建也确认了 S15 提示词的一致性问题并已修复：定时终态送达说明（SCHEDULE_EVENT_RULE）仅在 HarnessOptions 启用时附加，上一课入口的提示词与 S14 逐字相同。
 
 在 s15 子工程用临时假配置直接运行 `HarnessMain`，管道输入 exit：正常加载 2 个示例技能、记忆索引 0 条、任务 0 个、计划 0 个，无 mcp.json 时无 MCP 确认与工具，横幅、25 个工具列表与退出均正常，未请求模型；临时 config.properties 已删除。自动测试不依赖真实终端：事件唤醒的控制台路径由管道与 PipedReader 单元测试覆盖。模型是否在合适时机响应事件轮、限流与超长错误在真实服务商下的表现需真实服务单独验收；Unix 分支与真实第三方 MCP server 未在本机执行。
+
+## S16 Workflow Runtime 验证
+
+2026-10-27，Windows、JDK 17.0.2、Maven Wrapper 3.9.3（须显式指定 JAVA_HOME 为 JDK 17）。复制 S15 为 s16 并重命名包，HarnessMain 移入 app，新增 workflow 包与 WorkflowMain，父 POM 聚合 s16。根目录 `.\mvnw.cmd -B clean package` 十六模块全部成功：共 5797 项测试，5772 通过、25 项跳过，无失败或错误。S01—S15 源码与测试未改动，沿用上次的 5159 项；S16 共 638 项、636 通过、2 跳过（与 S15 相同的两项符号链接测试），新增 32 项（workflow 包 32 项，另在权限策略测试中补充五个工作流工具断言）覆盖：创建往返与校验不落盘、上限、无效文件告警跳过、原子替换、启动修复、组合状态校验；顺序执行与双检查点、前序结果传递与截断、模型失败与达上限转 failed、从失败步骤续跑不重跑已完成步骤、中断转 paused、拒绝运行 running/completed/cancelled；五个工具的参数校验与 cancel 生命周期；通过 TeamMain 的完整会话：31 个工具与规则、上一课入口 26 个工具且提示词逐字不变、create→run 免确认、失败后跨会话续跑、中断暂停、启动修复、Hook 拦截、团队模式 Lead 35 个工具而队友没有。首轮测试暴露三处测试数据构造错误（跳过 markRunning 直接 finish 被组合校验正确拒绝）和一处团队测试竞态（队友尚未请求主循环已退出，改为 CompletableFuture 等待后连跑 4 次稳定）。Windows 临时文件替换偶发 AccessDenied 与 S13—S15 记录相同，重跑通过。
+
+未用真实终端与真实模型验收：模型是否在合适时机选择工作流、步骤说明质量与断点续跑的实际体验需真实服务单独验收；Unix 分支未在本机执行。

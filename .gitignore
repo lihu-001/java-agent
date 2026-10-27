@@ -13,3 +13,4 @@ config.properties
 .schedules/
 .mailboxes/
 .worktrees/
+.workflows/

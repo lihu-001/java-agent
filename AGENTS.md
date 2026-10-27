@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-十五个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
+十六个独立 Maven 子工程，根 POM 仅聚合构建并统一版本：
 
 - `s01`：最小文本对话，无工具；入口 `dev.learnagent.s01.AgentLoopMain`。
 - `s02`：基于 S01 增加单工具、多工具分派、Shell 和文件工具；入口 `dev.learnagent.s02.ToolUseMain`。
@@ -19,6 +19,7 @@
 - `s13`：基于 S12 增加 Agent Teams 团队协作；入口 `dev.learnagent.s13.TeamMain`。
 - `s14`：基于 S13 增加 MCP Plugin 外部工具接入；入口 `dev.learnagent.s14.McpMain`。
 - `s15`：基于 S14 集成 Harness，不新增独立机制；入口 `dev.learnagent.s15.HarnessMain`。
+- `s16`：基于 S15 增加 Workflow Runtime 持久化工作流；入口 `dev.learnagent.s16.WorkflowMain`。
 
 每课有完整源码、测试、POM、配置示例与 README；类全部在本模块的 `dev.learnagent.s0N` 包及其子包。后续课复制前一课阶段源码后修改扩展，不通过跨模块 Java 依赖或 common 工程隐藏实现。用户已明确用教学快照替代旧版“共用一份循环、不复制”的要求。
 
@@ -51,6 +52,8 @@ S13 根包只保留 `TeamMain`，`ScheduleMain` 移入 `app`；新增 `s13.team`
 S14 根包只保留 `McpMain`，`TeamMain` 移入 `app`；新增 `s14.mcp`：`McpConfig`、`McpTrustSnapshot`、`McpTrustStore`、`McpClient`、`McpTool`、`McpManager`。配置固定为 `s14/.agents/mcp.json`（`mcpServers`，只支持 stdio，最多 8 个），缺失时与 S13 完全相同；格式错误阻止启动，单个 server 失败告警跳过。command/args 直接交给 ProcessBuilder，不经过 Shell，工作目录为 S14 子项目；env 值可用 `${NAME}` 引用进程环境变量，确认时只显示变量名。启动前经过独立的 MCP 信任确认（y/once/其余及 EOF 不启动），记录在用户目录 `.java-agent/mcp-trust/`，与 Hook 信任分开，测试使用临时存储。McpClient 逐行收发 JSON-RPC：initialize（2025-06-18）→ initialized → tools/list 分页；调用超时发送 cancelled，断开不重连，关闭先关 stdin 再结束进程树。工具名 `mcp__<server>__<tool>`，与内置工具一样经过 Hook 与权限：默认 ASK，mcp.json `allow` 中的工具 ALLOW。只有主 Agent（团队模式为 Lead）有 MCP 工具，子代理与队友没有；`ChatLoop` 与 `ToolRegistry` 不修改。测试使用独立 JVM 运行的 `FakeMcpServer`，不依赖 Python。Hook 配置固定为 `s14/.agents/hook.json`。
 
 S15 根包只保留 `HarnessMain`，`McpMain` 移入 `app`；新增 `s15.harness`：`TurnEvents`、`EventHub`、`AgentConsole`、`ModelRetryPolicy`、`HarnessOptions`。不新增独立机制，只做集成与错误恢复。`ScheduleManager` 新增带事件出口的构造方法：非取消终态把一行摘要发给 `EventHub`；`BackgroundManager` 先入队通知再触发完成监听器。哨兵轮 `<system-events>`：控制台空闲时被事件唤醒，该轮不记录用户消息、不触发 UserPromptSubmit、事件合并渲染作为一条新 user 消息进入、无事件不请求模型；轮次期间 `PermissionGate` 对 ASK 立即拒绝（不读确认输入流），队友确认不受影响。通知送达语义不变（附加最后一条消息、只送达一次、未保存放回原队列）。`OpenAiClient` 把 429/503/529 映射为 `ModelUnavailableException`（Retry-After 数字秒），400/413 超长文案映射为 `ContextTooLargeException`，正文不进异常消息；限流按 Retry-After（≤60s）或指数退避（2s→4s→8s，≤30s）最多重试 3 次；上下文超长用 `ContextCompactor` force 重载立即总结一次并重试。`HarnessOptions` 为 null 时全部增强关闭（上一课入口与 S14 完全相同）；`ChatLoop` 旧构造器全部保留。关闭顺序不变。Hook 配置固定为 `s15/.agents/hook.json`。
+
+S16 根包只保留 `WorkflowMain`，`HarnessMain` 移入 `app`；新增 `s16.workflow`：`StepStatus`、`WorkflowStatus`、`WorkflowStep`、`WorkflowRecord`、`WorkflowStore`、`WorkflowRunner`、`WorkflowTools`、`WorkflowBinding`、`WorkflowStarter`。工作流为工作目录 `.workflows/workflow_xxxxxxxx.json`，文件是唯一数据源，每次调用重读，临时文件原子替换，根 `.gitignore` 忽略。`workflow_run` 从第一个未完成步骤顺序执行，每步由同一个 `SubagentRunner` 在新历史中完成，前序结果截断后附入后续步骤；每步开始与结束各落盘一次检查点，失败转 failed、中断转 paused，启动时 running 修复为 paused，失败步骤重跑。五个 `workflow_*` 工具免确认但经过 Hook，步骤内子代理写入与 Shell 仍逐次确认；只有主 Agent（团队模式为 Lead）有，子代理与队友没有；`ChatLoop`、`SubagentRunner`、`ToolRegistry` 不修改。`WorkflowStarter` 为 null 时与 S15 逐字相同。Hook 配置固定为 `s16/.agents/hook.json`。
 
 ## 构建与测试
 

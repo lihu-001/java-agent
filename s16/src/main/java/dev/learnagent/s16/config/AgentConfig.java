@@ -1,0 +1,138 @@
+package dev.learnagent.s16.config;
+
+import cn.hutool.core.util.StrUtil;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Properties;
+
+public record AgentConfig(String baseUrl, String apiKey, String model, Path workDirectory,
+                          int maxModelCalls, Duration shellTimeout, int maxOutputChars,
+                          int compactThresholdChars, int compactKeepToolResults, Duration backgroundTimeout,
+                          int schedulerPollSeconds, boolean teamEnabled) {
+    public static final int DEFAULT_COMPACT_THRESHOLD_CHARS = 50000;
+    public static final int DEFAULT_COMPACT_KEEP_TOOL_RESULTS = 3;
+    public static final int DEFAULT_BACKGROUND_TIMEOUT_SECONDS = 600;
+    public static final int DEFAULT_SCHEDULER_POLL_SECONDS = 15;
+
+    /** S12 的字段；团队模式默认关闭，行为与 S12 相同。 */
+    public AgentConfig(String baseUrl, String apiKey, String model, Path workDirectory,
+                       int maxModelCalls, Duration shellTimeout, int maxOutputChars,
+                       int compactThresholdChars, int compactKeepToolResults, Duration backgroundTimeout,
+                       int schedulerPollSeconds) {
+        this(baseUrl, apiKey, model, workDirectory, maxModelCalls, shellTimeout, maxOutputChars,
+                compactThresholdChars, compactKeepToolResults, backgroundTimeout, schedulerPollSeconds, false);
+    }
+
+    /** S07 及之前的字段；压缩、后台与调度设置取默认值。 */
+    public AgentConfig(String baseUrl, String apiKey, String model, Path workDirectory,
+                       int maxModelCalls, Duration shellTimeout, int maxOutputChars) {
+        this(baseUrl, apiKey, model, workDirectory, maxModelCalls, shellTimeout, maxOutputChars,
+                DEFAULT_COMPACT_THRESHOLD_CHARS, DEFAULT_COMPACT_KEEP_TOOL_RESULTS);
+    }
+
+    /** S10 及之前的字段；后台命令超时与调度间隔取默认值。 */
+    public AgentConfig(String baseUrl, String apiKey, String model, Path workDirectory,
+                       int maxModelCalls, Duration shellTimeout, int maxOutputChars,
+                       int compactThresholdChars, int compactKeepToolResults) {
+        this(baseUrl, apiKey, model, workDirectory, maxModelCalls, shellTimeout, maxOutputChars,
+                compactThresholdChars, compactKeepToolResults,
+                Duration.ofSeconds(DEFAULT_BACKGROUND_TIMEOUT_SECONDS));
+    }
+
+    /** S11 的字段；调度检查间隔取默认值。 */
+    public AgentConfig(String baseUrl, String apiKey, String model, Path workDirectory,
+                       int maxModelCalls, Duration shellTimeout, int maxOutputChars,
+                       int compactThresholdChars, int compactKeepToolResults, Duration backgroundTimeout) {
+        this(baseUrl, apiKey, model, workDirectory, maxModelCalls, shellTimeout, maxOutputChars,
+                compactThresholdChars, compactKeepToolResults, backgroundTimeout,
+                DEFAULT_SCHEDULER_POLL_SECONDS);
+    }
+
+    public static AgentConfig load(Path path) {
+        Properties properties = new Properties();
+        try (BufferedReader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+            // 兼容 Windows 编辑器保存的 UTF-8 BOM，避免污染第一个配置项的名称。
+            reader.mark(1);
+            if (reader.read() != '\uFEFF') {
+                reader.reset();
+            }
+            properties.load(reader);
+        } catch (NoSuchFileException e) {
+            throw new IllegalArgumentException("找不到 " + path.toAbsolutePath()
+                    + "，请从 config.example.properties 复制并填写配置");
+        } catch (IOException e) {
+            throw new IllegalArgumentException("无法读取配置文件：" + path.toAbsolutePath());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("配置文件格式错误，请检查 properties 转义格式");
+        }
+        return new AgentConfig(
+                required(properties, "openai.base-url", "https://api.openai.com/v1"),
+                required(properties, "openai.api-key", null),
+                required(properties, "openai.model", null),
+                Path.of(required(properties, "agent.work-dir", "playground")),
+                positiveInt(properties, "agent.max-model-calls", 10),
+                Duration.ofSeconds(positiveInt(properties, "shell.timeout-seconds", 30)),
+                positiveInt(properties, "shell.max-output-chars", 12000),
+                positiveInt(properties, "compact.threshold-chars", DEFAULT_COMPACT_THRESHOLD_CHARS),
+                positiveInt(properties, "compact.keep-tool-results", DEFAULT_COMPACT_KEEP_TOOL_RESULTS),
+                Duration.ofSeconds(positiveInt(properties, "background.timeout-seconds",
+                        DEFAULT_BACKGROUND_TIMEOUT_SECONDS)),
+                positiveInt(properties, "scheduler.poll-seconds", DEFAULT_SCHEDULER_POLL_SECONDS),
+                bool(properties, "team.enabled", false));
+    }
+
+    /** S13：换一个工作目录（worktree 队友使用），其他设置不变。 */
+    public AgentConfig withWorkDirectory(Path directory) {
+        return new AgentConfig(baseUrl, apiKey, model, directory, maxModelCalls, shellTimeout, maxOutputChars,
+                compactThresholdChars, compactKeepToolResults, backgroundTimeout, schedulerPollSeconds, teamEnabled);
+    }
+
+    /** S13：打开或关闭团队模式，其他设置不变。 */
+    public AgentConfig withTeamEnabled(boolean enabled) {
+        return new AgentConfig(baseUrl, apiKey, model, workDirectory, maxModelCalls, shellTimeout, maxOutputChars,
+                compactThresholdChars, compactKeepToolResults, backgroundTimeout, schedulerPollSeconds, enabled);
+    }
+
+    /** 只接受 true / false（不区分大小写），拼错时报错而不是悄悄关闭。 */
+    private static boolean bool(Properties properties, String key, boolean defaultValue) {
+        String value = properties.getProperty(key, String.valueOf(defaultValue)).strip();
+        if (value.equalsIgnoreCase("true")) {
+            return true;
+        }
+        if (value.equalsIgnoreCase("false")) {
+            return false;
+        }
+        throw new IllegalArgumentException(key + " 必须为 true 或 false");
+    }
+
+    private static int positiveInt(Properties properties, String key, int defaultValue) {
+        try {
+            int value = Integer.parseInt(properties.getProperty(key, String.valueOf(defaultValue)).strip());
+            if (value > 0) {
+                return value;
+            }
+        } catch (NumberFormatException ignored) {
+            // 只展示配置名称，避免错误信息回显配置内容。
+        }
+        throw new IllegalArgumentException(key + " 必须为正整数");
+    }
+
+    private static String required(Properties properties, String key, String defaultValue) {
+        String value = properties.getProperty(key, defaultValue);
+        if (StrUtil.isBlank(value)) {
+            throw new IllegalArgumentException("请在 config.properties 中填写 " + key);
+        }
+        return value.strip();
+    }
+
+    @Override
+    public String toString() {
+        return "AgentConfig[baseUrl=" + baseUrl + ", apiKey=***, model=" + model + "]";
+    }
+}
